@@ -1,24 +1,24 @@
 ---
-description: Set per-account handicap (0–100). Higher = picker avoids this account.
+description: 계정별 handicap 설정 (0–100). 높을수록 picker 가 회피.
 argument-hint: "<num> <percent>"
 ---
 
-Parse `$ARGUMENTS` as two values: account number and handicap percent (0–100).
+`$ARGUMENTS` 를 두 값으로 파싱: 계정 번호 + handicap 퍼센트 (0–100).
 
-If the user provided both:
+둘 다 제공됐으면:
 ```bash
 ccswitch.sh --set-handicap <num> <pct>
 ```
 
-If they didn't provide arguments, first run `ccswitch.sh --list` so they can see account numbers, then ask which account and what handicap.
+인자 없이 호출됐으면 먼저 `ccswitch.sh --list` 를 실행해 사용자가 계정 번호를 볼 수 있게 한 후, 어떤 계정에 얼마 설정할지 질문.
 
-What handicap does (so you can explain):
+Handicap 동작 설명 (필요 시 사용자에게 안내):
 
-- Added to `max(5h, 7d)` to produce the `Adjusted` score the picker minimizes.
-- A `handicap > 0` account is moved from the `healthy-clean` tier to the lower-priority `healthy-handicap` tier — i.e. the picker will use maxed-with-extra accounts before falling back to a handicapped one.
-- A handicapped account with `raw_max + handicap >= 100` goes to the very-last-resort `blocked-handicap` tier.
-- `urgency_bonus` (the imminent-reset discount) is suppressed on handicapped accounts so the "use less" intent isn't undone by "spend it before reset".
+- `max(5h, 7d)` 에 더해져서 picker 가 최소화하는 `Adjusted` 점수가 됨.
+- `handicap > 0` 계정은 `healthy-clean` tier 에서 우선순위 낮은 `healthy-handicap` tier 로 격하 — 즉 picker 가 maxed-with-extra 계정을 먼저 쓰고, handicap 적용 계정은 그 다음 fallback.
+- handicap 계정이 `raw_max + handicap >= 100` 이 되면 최후의 fallback인 `blocked-handicap` tier 로.
+- `urgency_bonus` (임박 reset 할인) 는 handicap 적용 계정엔 적용 안 됨 — "덜 써라" 의도와 "임박했으니 써라" 가 충돌하기 때문.
 
-Typical use case: a personal account you'd rather not burn — `--set-handicap 2 30` makes the picker treat it as 30%p more loaded than it really is.
+전형적 use case: 덜 쓰고 싶은 개인 계정. `--set-handicap 2 30` 으로 picker 가 30%p 더 부하 있는 것처럼 취급하게 함.
 
-To clear a handicap, set it back to 0.
+handicap 해제는 0 으로 다시 설정.

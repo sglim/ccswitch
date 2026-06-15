@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# ccswitch installer (macOS).
+# ccswitch 인스톨러 (macOS).
 #
-# Usage:
-#   ./install.sh                # symlink scripts into ~/.local/bin
-#   ./install.sh --agent        # …and install the LaunchAgent
-#   ./install.sh --statusbar    # …and install the SwiftBar plugin (if SwiftBar is present)
-#   ./install.sh --all          # both of the above
-#   ./install.sh --uninstall    # remove symlinks (does NOT touch ~/.claude-switch-backup data)
+# 사용법:
+#   ./install.sh                # ~/.local/bin 에 심볼릭 링크
+#   ./install.sh --agent        # …+ LaunchAgent 설치
+#   ./install.sh --statusbar    # …+ SwiftBar 플러그인 (SwiftBar 가 설치돼 있어야 함)
+#   ./install.sh --all          # 위 둘 다
+#   ./install.sh --uninstall    # 심볼릭 링크 제거 (~/.claude-switch-backup 데이터는 보존)
 #
-# Idempotent: re-running just refreshes symlinks.
+# 멱등: 재실행해도 심볼릭 링크만 재생성.
 
 set -euo pipefail
 
@@ -31,7 +31,7 @@ for arg in "$@"; do
             sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'
             exit 0
             ;;
-        *) echo "unknown arg: $arg" >&2; exit 2 ;;
+        *) echo "알 수 없는 인자: $arg" >&2; exit 2 ;;
     esac
 done
 
@@ -40,34 +40,34 @@ yellow() { printf "\033[33m%s\033[0m\n" "$*"; }
 red() { printf "\033[31m%s\033[0m\n" "$*" >&2; }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Uninstall path
+# Uninstall
 # ─────────────────────────────────────────────────────────────────────────────
 if (( uninstall )); then
     for f in ccswitch.sh ccswitch-statusbar; do
         if [[ -L "${BIN_DIR}/${f}" ]]; then
             rm "${BIN_DIR}/${f}"
-            yellow "removed symlink ${BIN_DIR}/${f}"
+            yellow "심볼릭 링크 제거: ${BIN_DIR}/${f}"
         fi
     done
     if [[ -f "$AGENT_PLIST" ]]; then
         launchctl bootout "gui/$(id -u)/${AGENT_LABEL}" 2>/dev/null || true
         rm "$AGENT_PLIST"
-        yellow "removed LaunchAgent ${AGENT_LABEL}"
+        yellow "LaunchAgent 제거: ${AGENT_LABEL}"
     fi
     sb_link="${SWIFTBAR_DIR}/ccswitch.10s.sh"
     if [[ -L "$sb_link" ]]; then
         rm "$sb_link"
-        yellow "removed SwiftBar plugin symlink"
+        yellow "SwiftBar 플러그인 심볼릭 링크 제거"
     fi
-    green "uninstall complete. user data in ~/.claude-switch-backup left intact."
+    green "uninstall 완료. ~/.claude-switch-backup 데이터는 그대로 보존됨."
     exit 0
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Platform + dependency checks
+# 플랫폼 + 의존성 체크
 # ─────────────────────────────────────────────────────────────────────────────
 if [[ "$(uname -s)" != "Darwin" ]]; then
-    red "ccswitch is macOS-only (relies on /usr/bin/security + LaunchAgent + osascript)."
+    red "ccswitch 는 macOS 전용입니다 (/usr/bin/security + LaunchAgent + osascript 의존)."
     exit 1
 fi
 
@@ -76,61 +76,61 @@ for cmd in jq curl bash; do
     command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
 done
 if (( ${#missing[@]} > 0 )); then
-    red "missing required dependencies: ${missing[*]}"
-    echo "  install with: brew install ${missing[*]}" >&2
+    red "필수 의존성 누락: ${missing[*]}"
+    echo "  설치 명령:  brew install ${missing[*]}" >&2
     exit 1
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Symlink scripts
+# 스크립트 심볼릭 링크
 # ─────────────────────────────────────────────────────────────────────────────
 mkdir -p "$BIN_DIR"
 for f in ccswitch.sh ccswitch-statusbar; do
     src="${REPO_DIR}/${f}"
     dst="${BIN_DIR}/${f}"
-    [[ -f "$src" ]] || { red "missing source file: $src"; exit 1; }
+    [[ -f "$src" ]] || { red "원본 파일 없음: $src"; exit 1; }
     chmod +x "$src"
     ln -sfn "$src" "$dst"
-    green "linked ${dst} -> ${src}"
+    green "링크 생성: ${dst} -> ${src}"
 done
 
 case ":$PATH:" in
     *":${BIN_DIR}:"*) ;;
-    *) yellow "note: ${BIN_DIR} is not on your PATH yet."
-       echo "      add this line to your shell rc:"
+    *) yellow "안내: ${BIN_DIR} 가 PATH 에 없습니다."
+       echo "      쉘 rc 파일에 추가하세요:"
        echo "        export PATH=\"\$HOME/.local/bin:\$PATH\"" ;;
 esac
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Optional: LaunchAgent
+# 선택: LaunchAgent
 # ─────────────────────────────────────────────────────────────────────────────
 if (( want_agent )); then
     echo
-    green "installing LaunchAgent (hourly auto-switch)..."
+    green "LaunchAgent 설치 중 (매시 자동 전환)..."
     "${BIN_DIR}/ccswitch.sh" --agent-install
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Optional: SwiftBar plugin
+# 선택: SwiftBar 플러그인
 # ─────────────────────────────────────────────────────────────────────────────
 if (( want_statusbar )); then
     echo
     if [[ ! -d "$SWIFTBAR_DIR" ]]; then
-        yellow "SwiftBar plugin dir not found: $SWIFTBAR_DIR"
-        echo "  install SwiftBar first:  brew install --cask swiftbar"
-        echo "  then run this with --statusbar again."
+        yellow "SwiftBar 플러그인 디렉토리를 찾을 수 없습니다: $SWIFTBAR_DIR"
+        echo "  먼저 SwiftBar 를 설치하세요:  brew install --cask swiftbar"
+        echo "  그 후 --statusbar 로 재실행."
     else
         sb_link="${SWIFTBAR_DIR}/ccswitch.10s.sh"
         ln -sfn "${BIN_DIR}/ccswitch-statusbar" "$sb_link"
-        green "linked SwiftBar plugin (10s refresh): $sb_link"
-        echo "  rename the link to ccswitch.<N>s.sh to change refresh interval"
+        green "SwiftBar 플러그인 링크 생성 (10초 refresh): $sb_link"
+        echo "  파일명을 ccswitch.<N>s.sh 로 바꾸면 refresh 간격 조정 가능"
     fi
 fi
 
 echo
-green "done. quick start:"
-echo "  ccswitch.sh --add-account          # add the currently-logged-in Claude account"
-echo "  ccswitch.sh --list                 # then add more by /login + add-account again"
-echo "  ccswitch.sh --show-usage           # see per-account utilization"
-echo "  ccswitch.sh --switch-lowest        # switch to the lowest-utilization account"
-echo "  ccswitch.sh --agent-install        # enable hourly auto-switch (LaunchAgent)"
+green "완료. 빠른 시작:"
+echo "  ccswitch.sh --add-account          # 현재 로그인된 Claude 계정 등록"
+echo "  ccswitch.sh --list                 # 계정 더 추가: /login 후 add-account 반복"
+echo "  ccswitch.sh --show-usage           # 계정별 사용량 조회"
+echo "  ccswitch.sh --switch-lowest        # 가장 여유 있는 계정으로 전환"
+echo "  ccswitch.sh --agent-install        # 매시 자동 전환 활성화 (LaunchAgent)"

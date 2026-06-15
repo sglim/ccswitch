@@ -1,17 +1,17 @@
 ---
-description: Add the currently-active Claude Code account to managed accounts. Snapshots credentials + config.
+description: 현재 active 인 Claude Code 계정을 관리 대상에 등록. credential + config 스냅샷.
 ---
 
-Run `ccswitch.sh --add-account`.
+`ccswitch.sh --add-account` 실행.
 
-Preconditions to check before running:
-1. The user is logged into Claude Code at this moment (`~/.claude/.claude.json` should exist and have an `oauthAccount` field). If not, tell them to `/login` first.
-2. The currently-active account is the one they want to add. ccswitch snapshots whatever is currently active.
+실행 전 확인할 것:
+1. 사용자가 지금 Claude Code 에 로그인 상태인가 (`~/.claude/.claude.json` 존재 + `oauthAccount` 필드 보유). 아니면 먼저 `/login` 하라고 안내.
+2. 현재 active 인 계정이 사용자가 등록하려는 그 계정인지. ccswitch 는 "지금 active 인 계정" 을 그대로 스냅샷함.
 
-After the command runs:
-- A new account number is assigned (next free slot in `~/.claude-switch-backup/sequence.json`).
-- The backup config and credential are copied; the keychain entry is duplicated under `Claude Code-Account-<N>-<email>`.
+명령 실행 후:
+- 다음 비어있는 슬롯에 계정 번호 할당 (`~/.claude-switch-backup/sequence.json`).
+- 백업 config + credential 복사, 키체인에 `Claude Code-Account-<N>-<email>` 항목 추가.
 
-To add multiple accounts: `claude /logout` → log into the next account → `/add` again. Repeat.
+여러 계정 등록 흐름: `claude /logout` → 다음 계정 로그인 → `/add` 다시. 반복.
 
-Once you have ≥ 2 accounts, suggest `/usage` to see how the picker scores them and `/switch` to switch to the best one.
+계정이 2개 이상 모이면 `/usage` 로 picker 가 어떻게 점수 매기는지 확인하고 `/switch` 로 최적 계정 전환 가능.
