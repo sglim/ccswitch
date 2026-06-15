@@ -82,10 +82,13 @@ sat_emoji() {
 if [[ -n "$active_num" && -f "$CACHE_DIR/account-$active_num" ]]; then
     read -r f s _ _ ext_en ext_u < "$CACHE_DIR/account-$active_num"
     emoji=$(sat_emoji "$f" "$s")
+    # Format: "🟢 #1  5h:5% 7d:1%  ext:0%"
+    # Earlier compact "5/1" looked like a date (May 1). Labeling each
+    # value with its window removes the date/ratio ambiguity.
     if [[ "$ext_en" == "true" && -n "$ext_u" ]]; then
-        echo "${emoji} ${active_num}: ${f:-?}/${s:-?} (e${ext_u}%)"
+        echo "${emoji} #${active_num}  5h:${f:-?}% 7d:${s:-?}%  ext:${ext_u}%"
     else
-        echo "${emoji} ${active_num}: ${f:-?}/${s:-?}"
+        echo "${emoji} #${active_num}  5h:${f:-?}% 7d:${s:-?}%"
     fi
 elif [[ -n "$active_num" ]]; then
     echo "❓ ${active_num}: no cache"
