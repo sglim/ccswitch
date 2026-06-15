@@ -1,0 +1,144 @@
+#!/usr/bin/env bash
+# ccswitch SwiftBar/xbar plugin — show cached usage in the macOS menu bar.
+#
+# Install (one-time):
+#   brew install --cask swiftbar       # or use xbar
+#   open -a SwiftBar                   # creates ~/Library/Application Support/SwiftBar/Plugins/
+#   ln -s "$HOME/.local/bin/ccswitch-statusbar" \
+#         "$HOME/Library/Application Support/SwiftBar/Plugins/ccswitch.10s.sh"
+#   # The "10s" suffix in the symlink filename = refresh interval. Adjust to taste.
+#
+# All data is read from $HOME/.claude-switch-backup/usage-cache/* with NO API
+# calls, so even a 5-second refresh is free. The cache is filled by ccswitch.sh
+# whenever it successfully fetches usage (manual or via LaunchAgent).
+
+set -euo pipefail
+export PATH="/opt/homebrew/bin:/usr/local/bin:${PATH:-/usr/bin:/bin:/usr/sbin:/sbin}"
+
+readonly BACKUP_DIR="$HOME/.claude-switch-backup"
+readonly SEQUENCE_FILE="$BACKUP_DIR/sequence.json"
+readonly CACHE_DIR="$BACKUP_DIR/usage-cache"
+readonly CCSWITCH_BIN="$HOME/.local/bin/ccswitch.sh"
+
+if [[ ! -f "$SEQUENCE_FILE" ]]; then
+    echo "ccswitch ⛔️"
+    echo "---"
+    echo "ccswitch is not configured (no sequence.json) | color=#aaaaaa"
+    exit 0
+fi
+
+# Resolve currently-active managed account by matching the live config's
+# accountUuid + organizationUuid against sequence.json. Both fields are
+# needed because the same accountUuid can appear under multiple orgs.
+live_cfg=""
+for p in "$HOME/.claude/.claude.json" "$HOME/.claude.json"; do
+    if [[ -f "$p" ]] && jq -e '.oauthAccount' "$p" >/dev/null 2>&1; then
+        live_cfg="$p"
+        break
+    fi
+done
+
+active_num=""
+if [[ -n "$live_cfg" ]]; then
+    live_uuid=$(jq -r '.oauthAccount.accountUuid // ""' "$live_cfg")
+    live_org=$(jq -r '.oauthAccount.organizationUuid // ""' "$live_cfg")
+    if [[ -n "$live_uuid" && -n "$live_org" ]]; then
+        active_num=$(jq -r --arg uuid "$live_uuid" --arg ou "$live_org" '
+            .accounts | to_entries[]
+            | select(.value.uuid == $uuid and (.value.organizationUuid // "") == $ou)
+            | .key' "$SEQUENCE_FILE" 2>/dev/null | head -n1)
+    fi
+fi
+
+now=$(date +%s)
+
+# Format remaining-time seconds as a compact "Nd Nh" / "Nh Nm" / "Nm" string.
+fmt_rem() {
+    local rem="${1:-0}"
+    if [[ -z "$rem" || "$rem" == "0" ]]; then echo "—"; return; fi
+    if (( rem < 0 )); then echo "0m"; return; fi
+    local d=$(( rem / 86400 ))
+    local h=$(( (rem % 86400) / 3600 ))
+    local m=$(( (rem % 3600) / 60 ))
+    if (( d > 0 )); then printf '%dd%dh' "$d" "$h"
+    elif (( h > 0 )); then printf '%dh%dm' "$h" "$m"
+    else printf '%dm' "$m"
+    fi
+}
+
+# Pick a status emoji by saturation level. Treats max(5h, 7d) as the signal.
+sat_emoji() {
+    local five="${1:-0}" seven="${2:-0}"
+    [[ "$five" =~ ^[0-9]+$ ]] || five=0
+    [[ "$seven" =~ ^[0-9]+$ ]] || seven=0
+    local hi=$(( five > seven ? five : seven ))
+    if (( hi >= 100 )); then echo "🔴"
+    elif (( hi >= 80 )); then echo "🟡"
+    else echo "🟢"
+    fi
+}
+
+# ============ Menu-bar header (always one line) ============
+if [[ -n "$active_num" && -f "$CACHE_DIR/account-$active_num" ]]; then
+    read -r f s _ _ ext_en ext_u < "$CACHE_DIR/account-$active_num"
+    emoji=$(sat_emoji "$f" "$s")
+    if [[ "$ext_en" == "true" && -n "$ext_u" ]]; then
+        echo "${emoji} ${active_num}: ${f:-?}/${s:-?} (e${ext_u}%)"
+    else
+        echo "${emoji} ${active_num}: ${f:-?}/${s:-?}"
+    fi
+elif [[ -n "$active_num" ]]; then
+    echo "❓ ${active_num}: no cache"
+else
+    echo "❓ ccswitch"
+fi
+
+echo "---"
+
+# ============ Dropdown ============
+echo "ccswitch — cache only (no API call) | color=#888888 size=10"
+echo "---"
+
+# Column header
+printf '%s\n' "  # Email                              5h%  5h-rst   7d%  7d-rst   Ext | font=Menlo size=11 trim=false"
+
+# Per-account rows
+nums=$(jq -r '.accounts | keys | map(tonumber) | sort | .[]' "$SEQUENCE_FILE")
+while read -r num; do
+    [[ -z "$num" ]] && continue
+    email=$(jq -r --arg n "$num" '.accounts[$n].email // ""' "$SEQUENCE_FILE")
+    [[ -z "$email" ]] && continue
+    cache="$CACHE_DIR/account-$num"
+    if [[ "$num" == "$active_num" ]]; then prefix="●"; else prefix=" "; fi
+
+    if [[ -f "$cache" ]]; then
+        # Cache may have 4 fields (legacy) or 6 fields. Trailing fields just
+        # come back empty; that's fine.
+        read -r five seven five_r seven_r ext_en ext_u < "$cache"
+        five_r=${five_r:-0}; seven_r=${seven_r:-0}
+        five_rem=$(( five_r > now ? five_r - now : 0 ))
+        seven_rem=$(( seven_r > now ? seven_r - now : 0 ))
+        if [[ "$ext_en" == "true" ]]; then
+            if [[ "$ext_u" =~ ^[0-9]+$ ]]; then
+                ext_disp="${ext_u}%"
+            else
+                ext_disp="yes"
+            fi
+        else
+            ext_disp="—"
+        fi
+        line=$(printf '%s %2s %-32s %3s%%  %-6s  %3s%%  %-6s   %s' \
+            "$prefix" "$num" "${email:0:32}" \
+            "${five:-0}" "$(fmt_rem "$five_rem")" \
+            "${seven:-0}" "$(fmt_rem "$seven_rem")" \
+            "$ext_disp")
+    else
+        line=$(printf '%s %2s %-32s   (no cache yet)' "$prefix" "$num" "${email:0:32}")
+    fi
+    printf '%s | font=Menlo size=11 trim=false\n' "$line"
+done <<< "$nums"
+
+echo "---"
+echo "Show usage (live, hits API) | shell='$CCSWITCH_BIN' param1='--show-usage' terminal=true"
+echo "Switch lowest | shell='$CCSWITCH_BIN' param1='--switch-lowest' terminal=true"
+echo "Refresh now | refresh=true"
