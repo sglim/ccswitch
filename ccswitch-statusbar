@@ -138,7 +138,17 @@ while read -r num; do
     else
         line=$(printf '%s %2s %-32s   (no cache yet)' "$prefix" "$num" "${email:0:32}")
     fi
-    printf '%s | font=Menlo size=11 trim=false\n' "$line"
+    # Make each non-active row a click target that switches to that
+    # account. terminal=false runs it silently; ccswitch posts its own
+    # macOS notification on success, and refresh=true repaints the
+    # widget so the ● moves. The active row gets no action (switching
+    # to the current account is a no-op).
+    if [[ "$num" == "$active_num" ]]; then
+        printf '%s | font=Menlo size=11 trim=false\n' "$line"
+    else
+        printf '%s | font=Menlo size=11 trim=false shell='"'"'%s'"'"' param1='"'"'--switch-to'"'"' param2='"'"'%s'"'"' terminal=false refresh=true\n' \
+            "$line" "$CCSWITCH_BIN" "$num"
+    fi
 done <<< "$nums"
 
 echo "---"
