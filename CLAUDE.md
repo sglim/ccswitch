@@ -31,7 +31,7 @@ ccswitch 는 **macOS 전용** bash 도구. Anthropic 의 `/api/oauth/usage` API 
 - 스크립트 내부 TSV 구분자는 `\x1f` (ASCII US), tab 아님 — tab 은 `read -r` 의 기본 IFS 가 collapse 시켜 빈 필드를 날려버림.
 - `gather_all_usage` 출력 contract: `num<US>email<US>five<US>seven<US>handicap<US>adjusted<US>status<US>five_rem<US>seven_rem<US>has_extra<US>extra_util`. 변경 금지 — `pick_from_usage_data`, `render_usage_table`, `cmd_show_usage` 모두 이걸 파싱.
 - adjusted 공식: `max(5h, 7d) + handicap − urgency_bonus`. `urgency_bonus = max(0, 48 − binding_window_hours)` (handicap == 0 일 때만, 아니면 0). `blocked-handicap` 검사는 urgency 보정 전 raw `max + handicap` 기준.
-- Picker tier 순서 (중요): stale > cold > healthy-clean > maxed-extra-alt > maxed-extra > healthy-handicap > maxed-no-extra > blocked-handicap. Tie-break: lowest `adjusted` → smallest `seven_rem` (0 은 `+∞` 로 정규화 — 미상 reset 이 이기지 않게) → lowest `num`.
+- Picker tier 순서 (중요): stale > cold > healthy > maxed-extra-alt > maxed-extra > maxed-no-extra > blocked-handicap. healthy 는 handicap 유무로 나누지 않음 — handicap 은 `adjusted` 에만 반영되고, handicap 계정도 adjusted 최저면 healthy tier 에서 선택됨. handicap 의 강한 회피는 blocked-handicap(raw+handicap>=100) 에서만 발동. Tie-break: lowest `adjusted` → smallest `seven_rem` (0 은 `+∞` 로 정규화 — 미상 reset 이 이기지 않게) → lowest `num`.
 - Hysteresis (`HYSTERESIS_DELTA`, 기본 10%p) 는 current+target 둘 다 `status=="ok"` 일 때만 switch 차단. `stale`/`cold`/`estimated`/`blocked-handicap` 은 우회.
 
 ## 테스트

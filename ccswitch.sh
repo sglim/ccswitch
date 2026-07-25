@@ -950,8 +950,7 @@ pick_from_usage_data() {
     local current_num="${1:-}"
     local stale_num=""
     local cold_num="" cold_score="" cold_rem=""
-    local healthy_clean_num="" healthy_clean_score="" healthy_clean_rem=""
-    local healthy_hd_num="" healthy_hd_score="" healthy_hd_rem=""
+    local healthy_num="" healthy_score="" healthy_rem=""
     # maxed-extra has two collectors: "_alt" excludes the current active
     # num to enforce round-robin; the unsuffixed one keeps every ext
     # candidate so we can still fall back when current is the only one.
@@ -1033,22 +1032,19 @@ pick_from_usage_data() {
         # closer to resetting. Otherwise the picker would lock onto the
         # lowest num forever and waste imminent-reset headroom.
         if [[ "$five" != "100" && "$seven" != "100" ]]; then
-            if (( has_handicap )); then
-                if [[ -z "$healthy_hd_num" ]]; then
-                    healthy_hd_num="$num"; healthy_hd_score="$adjusted"; healthy_hd_rem="$seven_rem_norm"
-                elif (( adjusted < healthy_hd_score )); then
-                    healthy_hd_num="$num"; healthy_hd_score="$adjusted"; healthy_hd_rem="$seven_rem_norm"
-                elif (( adjusted == healthy_hd_score && seven_rem_norm < healthy_hd_rem )); then
-                    healthy_hd_num="$num"; healthy_hd_score="$adjusted"; healthy_hd_rem="$seven_rem_norm"
-                fi
-            else
-                if [[ -z "$healthy_clean_num" ]]; then
-                    healthy_clean_num="$num"; healthy_clean_score="$adjusted"; healthy_clean_rem="$seven_rem_norm"
-                elif (( adjusted < healthy_clean_score )); then
-                    healthy_clean_num="$num"; healthy_clean_score="$adjusted"; healthy_clean_rem="$seven_rem_norm"
-                elif (( adjusted == healthy_clean_score && seven_rem_norm < healthy_clean_rem )); then
-                    healthy_clean_num="$num"; healthy_clean_score="$adjusted"; healthy_clean_rem="$seven_rem_norm"
-                fi
+            # Single healthy tier: handicap already lives in `adjusted`
+            # (max + handicap), so a handicapped account competes on its
+            # score alone — no separate lower tier. This is what lets a
+            # handicapped account with the lowest adjusted win over a
+            # non-handicap account sitting at, say, 94%. The
+            # blocked-handicap guard above still fully excludes a
+            # handicapped account whose raw+handicap >= 100.
+            if [[ -z "$healthy_num" ]]; then
+                healthy_num="$num"; healthy_score="$adjusted"; healthy_rem="$seven_rem_norm"
+            elif (( adjusted < healthy_score )); then
+                healthy_num="$num"; healthy_score="$adjusted"; healthy_rem="$seven_rem_norm"
+            elif (( adjusted == healthy_score && seven_rem_norm < healthy_rem )); then
+                healthy_num="$num"; healthy_score="$adjusted"; healthy_rem="$seven_rem_norm"
             fi
         elif [[ "$has_extra" == "true" ]]; then
             # maxed-with-extra. Treat all candidates as equal-priority
@@ -1089,14 +1085,12 @@ pick_from_usage_data() {
         echo "$stale_num"
     elif [[ -n "$cold_num" ]]; then
         echo "$cold_num"
-    elif [[ -n "$healthy_clean_num" ]]; then
-        echo "$healthy_clean_num"
+    elif [[ -n "$healthy_num" ]]; then
+        echo "$healthy_num"
     elif [[ -n "$maxed_extra_alt_num" ]]; then
         echo "$maxed_extra_alt_num"
     elif [[ -n "$maxed_extra_num" ]]; then
         echo "$maxed_extra_num"
-    elif [[ -n "$healthy_hd_num" ]]; then
-        echo "$healthy_hd_num"
     elif [[ -n "$maxed_noextra_num" ]]; then
         echo "$maxed_noextra_num"
     else
@@ -1534,7 +1528,7 @@ cmd_switch_lowest() {
     # meaningfully lower than the current account's, stay put. Picker
     # already prefers tier-aware ordering (stale > cold > healthy > ext
     # > etc.), so we only apply this guard when current+target are
-    # both within the "healthy_clean / healthy_handicap / maxed_noextra"
+    # both within the "healthy / maxed_noextra"
     # bands where switching = killing the active session for marginal
     # gain. Stale / cold / blocked-handicap decisions still go through
     # immediately — those signal an account issue, not a tie.

@@ -131,12 +131,11 @@ urgency_bonus = max(0, 48 − binding_window_hours_until_reset)   # 48h 램프
 |---|---|---|
 | 1 | **stale** | `status=="unavailable"` — 토큰 만료, switch 로 refresh 유도 |
 | 2 | **cold** | `5h=0` + `5h_reset` 없음 + `7d != 100` — 5h 클럭 시작 목적 |
-| 3 | **healthy-clean** | 두 윈도우 모두 100% 미만, `handicap == 0` |
+| 3 | **healthy** | 두 윈도우 모두 100% 미만. handicap 유무 무관 — handicap 은 `adjusted` 점수에만 반영되고 tier 를 나누지 않음. 따라서 handicap 계정이라도 adjusted 가 최저면 이 tier 에서 선택됨 |
 | 4 | **maxed-with-extra (alt)** | 한 윈도우 100% 이지만 `hasExtraUsageEnabled` 이고 **현재 active 가 아닌** 계정 — 동등 후보 간 round-robin |
 | 5 | **maxed-with-extra** | 4번과 동일하나 `current` 가 유일 후보일 때 |
-| 6 | **healthy-handicap** | 두 윈도우 100% 미만, `handicap > 0` (maxed-with-extra 소진 후에만 진입) |
-| 7 | **maxed-no-extra** | 한 윈도우 100%, extra-usage 없음 |
-| 8 | **blocked-handicap** | `handicap > 0 && raw_max + handicap >= 100` — 최후의 fallback |
+| 6 | **maxed-no-extra** | 한 윈도우 100%, extra-usage 없음 |
+| 7 | **blocked-handicap** | `handicap > 0 && raw_max + handicap >= 100` — handicap 포함 사용률이 100% 이상인 계정은 실사용에 여유가 있어도 최후의 fallback 으로만 선택 (handicap 의 "이 계정 아끼기" 의도를 지키는 안전장치) |
 
 ### Tie-break
 
