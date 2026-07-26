@@ -13,9 +13,10 @@ ccswitch 는 **macOS 전용** bash 도구. Anthropic 의 `/api/oauth/usage` API 
 ## 자동화 구조 (cmd_tick)
 
 LaunchAgent 는 `StartInterval 60` 으로 매분 `--tick` 을 실행. `cmd_tick` 은:
-1. **긴급**: 현재 계정만 1개 fetch → 5h 또는 7d 가 100% 면 즉시 `cmd_switch_lowest` (hysteresis 강제 off, `CCSWITCH_HYSTERESIS_DELTA=0`).
-2. **정기**: `date +%M` 이 `00` 이면 (매시 정각) 일반 `cmd_switch_lowest` (전 계정 sweep).
-3. 그 외 분: 무출력 no-op — cron.log 를 조용히 유지하고 분당 API 호출을 active 1개로 제한 (429 회피).
+1. **긴급 포화**: 현재 계정만 1개 fetch → 5h 또는 7d 가 100% 면 즉시 `cmd_switch_lowest` (hysteresis 강제 off, `CCSWITCH_HYSTERESIS_DELTA=0`).
+2. **7d 리셋 fast-path**: 각 계정 캐시의 7d_reset epoch(캐시 field 4)를 확인 — now 가 그 epoch 를 방금(120초 window) 지난 비-current 계정이 있으면 `cmd_switch_to` 로 즉시 그 계정으로. **API 호출 0회** (캐시만 읽음). 120초 window 는 재발동 방지 + stale 캐시(만료 계정의 오래된 reset epoch) 무시 역할.
+3. **정기**: `date +%M` 이 `00` 이면 (매시 정각) 일반 `cmd_switch_lowest` (전 계정 sweep).
+4. 그 외 분: 무출력 no-op — cron.log 를 조용히 유지하고 분당 API 호출을 active 1개로 제한 (429 회피).
 
 wrapper 스크립트(`agent-switch-lowest`, 이름은 레거시)는 `exec ... ${CRON_COMMAND}` 로 `--tick` 을 호출. `CRON_COMMAND` 상수만 바꾸면 wrapper·plist 가 `--agent-install` 재실행 시 함께 갱신됨.
 

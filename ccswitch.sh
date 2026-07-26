@@ -1514,6 +1514,31 @@ cmd_tick() {
         fi
     fi
 
+    # 7d weekly-reset fast path: if any managed account's 7d window has
+    # just rolled over (its cached reset epoch is now in the past, within
+    # a short window), switch to it immediately instead of waiting for
+    # the top of the hour. A freshly-reset account is the most valuable
+    # slot to start using right away. Uses cached reset epochs only —
+    # zero API calls. The window (2 ticks) keeps it from re-firing
+    # forever: once picked, the account becomes current and is skipped;
+    # otherwise the window simply passes.
+    local reset_window=120 now_s n ncache nseven_reset since
+    now_s=$(date +%s)
+    for n in $(jq -r '.accounts | keys | map(tonumber) | sort | .[]' "$SEQUENCE_FILE" 2>/dev/null); do
+        [[ "$n" == "$current" ]] && continue
+        ncache="$USAGE_CACHE_DIR/account-$n"
+        [[ -f "$ncache" ]] || continue
+        nseven_reset=$(awk '{print $4}' "$ncache" 2>/dev/null)
+        [[ "$nseven_reset" =~ ^[0-9]+$ ]] || continue
+        (( nseven_reset > 0 )) || continue
+        since=$(( now_s - nseven_reset ))
+        if (( since >= 0 && since < reset_window )); then
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] Account-$n 7d window just reset — switching now."
+            cmd_switch_to "$n"
+            return 0
+        fi
+    done
+
     # Hourly cadence: only act on the top of the hour.
     if [[ "$minute" == "00" ]]; then
         cmd_switch_lowest

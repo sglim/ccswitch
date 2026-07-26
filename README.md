@@ -101,7 +101,7 @@ Next target: Account-3 (cold-warmup — 5h window untouched)
 | `--set-handicap <num> <pct>` | 계정별 handicap 설정 (0–100); 클수록 picker 가 회피 |
 | `--sync-current` | 현재 계정 백업을 live 키체인/config 로 새로고침 |
 | `--agent-install` | macOS LaunchAgent 설치 (매분 `--tick`) |
-| `--tick` | LaunchAgent 용 1분 tick: 현재 계정이 100% 면 즉시 전환, 매시 `:00` 엔 정기 switch-lowest. 그 외엔 no-op |
+| `--tick` | LaunchAgent 용 1분 tick: ①현재 계정 100% 포화 시 즉시 전환 ②다른 계정의 7d 주간한도가 방금 리셋되면 그 계정으로 즉시 전환 ③매시 `:00` 정기 switch-lowest. 그 외엔 no-op |
 | `--agent-status` | `launchctl print` 으로 agent 상태 |
 | `--agent-kick` | agent 즉시 트리거 (`launchctl kickstart`) |
 | `--agent-remove` | LaunchAgent 제거 (`~/.claude-switch-backup` 보존) |
