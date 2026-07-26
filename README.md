@@ -2,7 +2,7 @@
 
 **[Claude Code](https://docs.claude.com/en/docs/claude-code) 다계정 자동 전환기 — macOS 전용.**
 
-여러 Claude 계정을 자동으로 돌려가며 사용해서, 한 계정의 5시간/주간 한도가 차도 작업이 막히지 않게 합니다. ccswitch 는 지금 시점에 가장 여유가 많은 계정을 골라 Claude Code 에 넘기고, LaunchAgent 로 매시 정각마다 자동 재평가합니다.
+여러 Claude 계정을 자동으로 돌려가며 사용해서, 한 계정의 5시간/주간 한도가 차도 작업이 막히지 않게 합니다. ccswitch 는 지금 시점에 가장 여유가 많은 계정을 골라 Claude Code 에 넘기고, LaunchAgent 가 1분마다 현재 계정을 검사해 100% 포화 시 즉시 전환하며 매시 정각에 정기 재평가합니다.
 
 > macOS 전용입니다. 로그인 키체인 (`/usr/bin/security`), `launchd`, `osascript` 알림과의 통합이 핵심이라서 그렇습니다. 스크립트 안에 best-effort 수준의 Linux/WSL 분기가 일부 있지만 공식 지원 계획은 없습니다.
 
@@ -13,7 +13,7 @@
 - **다계정 관리** — 각 계정의 OAuth credential + config 를 `~/.claude-switch-backup` 에 안정된 계정 번호로 백업
 - **최저 사용량 계정으로 전환** — 관리 중인 모든 계정에 대해 (실제 switch 없이) Anthropic `/api/oauth/usage` 를 호출하고 tier 기반 알고리즘으로 최적 후보 선택
 - **계정별 handicap** — 덜 쓰고 싶은 계정 (예: 개인 계정) 에 가중치를 줘서 picker 가 일부러 회피하도록 설정
-- **LaunchAgent 매시 자동 전환** — Aqua GUI 세션 안에서 돌기 때문에 키체인 접근과 macOS 알림이 정상 동작 (cron 도 지원되지만 키체인 접근 불가)
+- **LaunchAgent 자동 전환 (매분 tick)** — 1분마다 현재 계정만 가볍게 검사해서 **100% 포화 시 즉시 전환**, 그 외엔 **매시 정각(:00)에 정기 전환**. Aqua GUI 세션 안에서 돌기 때문에 키체인 접근과 macOS 알림이 정상 동작 (cron 도 지원되지만 키체인 접근 불가)
 - **메뉴바 위젯 (SwiftBar/xbar)** — 캐시 전용 readout 으로 현재 active 계정 + 계정별 5h/7d/extra-usage 표시, 클릭 한 번으로 "최저 계정 전환"
 - **새 데몬 없음** — bash 스크립트 하나 + 선택적 plist. 나머지는 시스템의 `launchd` + `security` + `curl` + `jq`
 
@@ -37,7 +37,7 @@
 git clone git@github.com:sglim/ccswitch.git ~/repos/ccswitch
 cd ~/repos/ccswitch
 ./install.sh              # ~/.local/bin 에 심볼릭 링크만
-./install.sh --agent      # + 매시 정각 LaunchAgent 활성화
+./install.sh --agent      # + 자동 전환 LaunchAgent 활성화 (매분 tick)
 ./install.sh --statusbar  # + SwiftBar 플러그인 (10초 refresh)
 ./install.sh --all        # 전부 다
 ./install.sh --uninstall  # 링크 제거 (~/.claude-switch-backup 데이터는 보존)
@@ -69,7 +69,7 @@ ccswitch.sh --show-usage
 # 5) 지금 가장 여유 있는 계정으로 전환:
 ccswitch.sh --switch-lowest
 
-# 6) 매시 자동 전환 활성화:
+# 6) 자동 전환 활성화 (포화 시 즉시 + 매시 정기):
 ccswitch.sh --agent-install
 ```
 
@@ -100,7 +100,8 @@ Next target: Account-3 (cold-warmup — 5h window untouched)
 | `--show-usage` | 사용량 표 출력 (switch 안 함, 10초 API 캐시 활용) |
 | `--set-handicap <num> <pct>` | 계정별 handicap 설정 (0–100); 클수록 picker 가 회피 |
 | `--sync-current` | 현재 계정 백업을 live 키체인/config 로 새로고침 |
-| `--agent-install` | macOS LaunchAgent 설치 (매시 `:00` 정각) |
+| `--agent-install` | macOS LaunchAgent 설치 (매분 `--tick`) |
+| `--tick` | LaunchAgent 용 1분 tick: 현재 계정이 100% 면 즉시 전환, 매시 `:00` 엔 정기 switch-lowest. 그 외엔 no-op |
 | `--agent-status` | `launchctl print` 으로 agent 상태 |
 | `--agent-kick` | agent 즉시 트리거 (`launchctl kickstart`) |
 | `--agent-remove` | LaunchAgent 제거 (`~/.claude-switch-backup` 보존) |
@@ -164,7 +165,7 @@ CCSWITCH_HYSTERESIS_DELTA=5 ccswitch.sh --switch-lowest
 | 로그인 키체인 읽기 | ✓ | 키체인 unlock 상태일 때만 |
 | macOS 알림 표시 | ✓ | ✗ |
 | 재부팅 후 생존 | ✓ | ✓ |
-| 스케줄 | 매시 `:00` (`StartCalendarInterval`) | `0 * * * *` |
+| 스케줄 | 매분 `--tick` (`StartInterval 60`): 포화 시 즉시 전환 + 매시 :00 정기 | `0 * * * *` |
 
 **macOS 에서는 무조건 LaunchAgent 쓰세요.** cron 경로는 parity 와 edge case 용으로만 남겨둔 거고, macOS cron 은 키체인 접근이 안 돼서 `security find-generic-password` 가 빈 값을 반환하고 모든 fetch 가 실패합니다.
 

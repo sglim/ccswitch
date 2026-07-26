@@ -10,6 +10,15 @@ ccswitch 는 **macOS 전용** bash 도구. Anthropic 의 `/api/oauth/usage` API 
 - 메뉴바 위젯: `ccswitch-statusbar` (SwiftBar/xbar 플러그인)
 - 인스톨러: `install.sh`
 
+## 자동화 구조 (cmd_tick)
+
+LaunchAgent 는 `StartInterval 60` 으로 매분 `--tick` 을 실행. `cmd_tick` 은:
+1. **긴급**: 현재 계정만 1개 fetch → 5h 또는 7d 가 100% 면 즉시 `cmd_switch_lowest` (hysteresis 강제 off, `CCSWITCH_HYSTERESIS_DELTA=0`).
+2. **정기**: `date +%M` 이 `00` 이면 (매시 정각) 일반 `cmd_switch_lowest` (전 계정 sweep).
+3. 그 외 분: 무출력 no-op — cron.log 를 조용히 유지하고 분당 API 호출을 active 1개로 제한 (429 회피).
+
+wrapper 스크립트(`agent-switch-lowest`, 이름은 레거시)는 `exec ... ${CRON_COMMAND}` 로 `--tick` 을 호출. `CRON_COMMAND` 상수만 바꾸면 wrapper·plist 가 `--agent-install` 재실행 시 함께 갱신됨.
+
 ## 이 폴더에서 쓸 수 있는 slash 명령
 
 | Slash | 실행 내용 |

@@ -33,7 +33,7 @@ readonly AGENT_PLIST="$HOME/Library/LaunchAgents/${AGENT_LABEL}.plist"
 # prefer --agent-install which avoids the keychain/notification issues.
 readonly CRON_MARKER="# ccswitch-auto-switch"
 readonly CRON_SCHEDULE="0 * * * *"
-readonly CRON_COMMAND="--switch-lowest"
+readonly CRON_COMMAND="--tick"
 
 # Anthropic OAuth usage API constants (see claude-hud usage-api.js)
 readonly USAGE_API_URL="https://api.anthropic.com/api/oauth/usage"
@@ -1480,6 +1480,47 @@ identify_current_account() {
     echo "$current_account"
 }
 
+# Lightweight 1-minute tick, meant to be driven by the LaunchAgent.
+# Two triggers, cheapest-first so the common case costs one API call:
+#   1) EMERGENCY: fetch ONLY the current account. If it's saturated
+#      (5h>=100 or 7d>=100), switch away immediately — hysteresis is
+#      forced off because staying on a 100% account is never right.
+#   2) HOURLY: on the top of the hour (:00) run the normal
+#      switch-lowest, which sweeps every account. This preserves the
+#      old once-an-hour cadence.
+# Every other minute does nothing and prints nothing, so cron.log stays
+# quiet and we make at most one usage-API call per minute (the active
+# account), well under any rate limit.
+cmd_tick() {
+    [[ -f "$SEQUENCE_FILE" ]] || return 0
+
+    local minute current email util five seven
+    minute=$(date +%M)
+    current=$(identify_current_account)
+
+    # Emergency saturation check: current account only (1 API call).
+    if [[ -n "$current" ]]; then
+        email=$(jq -r --arg n "$current" '.accounts[$n].email // ""' "$SEQUENCE_FILE")
+        if [[ -n "$email" ]] && util=$(fetch_account_utilization "$current" "$email" 2>/dev/null); then
+            five=$(echo "$util" | awk '{print $1}')
+            seven=$(echo "$util" | awk '{print $2}')
+            [[ "$five" =~ ^[0-9]+$ ]] || five=0
+            [[ "$seven" =~ ^[0-9]+$ ]] || seven=0
+            if (( five >= 100 || seven >= 100 )); then
+                echo "[$(date '+%Y-%m-%d %H:%M:%S')] Emergency: Account-$current saturated (5h=${five}% 7d=${seven}%) — switching now."
+                CCSWITCH_HYSTERESIS_DELTA=0 cmd_switch_lowest
+                return 0
+            fi
+        fi
+    fi
+
+    # Hourly cadence: only act on the top of the hour.
+    if [[ "$minute" == "00" ]]; then
+        cmd_switch_lowest
+    fi
+    return 0
+}
+
 # Switch to the account with the lowest adjusted utilization.
 # Prints the same table --show-usage would, then the decision, using ONE
 # sweep of API calls. No-op if already on lowest, or no usable reading.
@@ -1963,7 +2004,7 @@ write_agent_wrapper() {
 # Auto-generated wrapper so macOS Background Activity shows
 # "agent-switch-lowest" instead of "bash". Re-run
 # '$(basename "$script_path") --agent-install' to regenerate.
-exec "${bash_path}" "${script_path}" --switch-lowest
+exec "${bash_path}" "${script_path}" ${CRON_COMMAND}
 EOF
     chmod +x "$wrapper"
 }
@@ -1984,10 +2025,8 @@ agent_plist_body() {
     <array>
         <string>${wrapper}</string>
     </array>
-    <key>StartCalendarInterval</key>
-    <array>
-        <dict><key>Minute</key><integer>0</integer></dict>
-    </array>
+    <key>StartInterval</key>
+    <integer>60</integer>
     <key>RunAtLoad</key>
     <false/>
     <key>StandardOutPath</key>
@@ -2038,7 +2077,8 @@ cmd_agent_install() {
     echo "Installed LaunchAgent: ${AGENT_LABEL}"
     echo "  plist:    $AGENT_PLIST"
     # echo "  schedule: every 60 seconds (StartInterval)"
-    echo "  schedule: every hour on the :00 mark (wall clock)"
+    echo "  schedule: every 60s (--tick): emergency switch if the active"
+    echo "            account hits 100%, plus the normal hourly switch at :00"
     echo "  log:      $CRON_LOG"
     echo ""
     echo "To trigger immediately:  launchctl kickstart $(agent_service_target)"
@@ -2130,6 +2170,7 @@ show_usage() {
     echo "  --switch                                   Rotate to next account in sequence"
     echo "  --switch-to <num|email|\"email (org)\">       Switch to specific account"
     echo "  --switch-lowest                            Switch to the account with lowest adjusted utilization"
+    echo "  --tick                                     LaunchAgent tick: emergency switch if active account is 100%, else hourly switch at :00"
     echo "  --show-usage                               Print per-account 5h/7d utilization + handicap table"
     echo "  --set-handicap <num> <percent>             Set per-account handicap (0-100); higher = picked less often"
     echo "  --sync-current                             Refresh current account's backup from live state"
@@ -2189,6 +2230,9 @@ main() {
             ;;
         --switch-lowest)
             cmd_switch_lowest
+            ;;
+        --tick)
+            cmd_tick
             ;;
         --show-usage)
             cmd_show_usage
