@@ -669,13 +669,13 @@ fetch_account_utilization() {
         return 1
     fi
 
-    # Returns six space-separated fields:
-    #   <5h%> <7d%> <5h_resets_epoch> <7d_resets_epoch> <extra_enabled> <extra_util>
+    # Returns seven space-separated fields:
+    #   <5h%> <7d%> <5h_resets_epoch> <7d_resets_epoch> <extra_enabled> <extra_util> <fable%>
     # resets_at are Unix epoch seconds; 0 if missing or unparsable.
     # extra_enabled is "true"/"false" from the live API (preferred over the
     # snapshot in backup config). extra_util is the rounded extra-usage
     # percentage (0 when disabled or absent).
-    local five seven five_reset seven_reset extra_enabled extra_util
+    local five seven five_reset seven_reset extra_enabled extra_util fable
     five=$(echo "$response" | jq -r '((.five_hour.utilization // 0) | floor)')
     seven=$(echo "$response" | jq -r '((.seven_day.utilization // 0) | floor)')
     # Anthropic returns "2026-04-26T21:10:00.809428+00:00" (microseconds +
@@ -686,8 +686,13 @@ fetch_account_utilization() {
     seven_reset=$(echo "$response" | jq -r ".seven_day.resets_at | $_iso_to_epoch")
     extra_enabled=$(echo "$response" | jq -r '.extra_usage.is_enabled // false')
     extra_util=$(echo "$response" | jq -r '((.extra_usage.utilization // 0) | floor)')
+    # Fable 은 별도 필드가 없고 limits[] 안에 weekly_scoped 로 들어온다:
+    #   {kind:"weekly_scoped", percent:31, scope:{model:{display_name:"Fable"}}}
+    # 없는 계정/플랜이면 -1 (미지원)로 두어 0%(=여유 만땅)와 구분한다.
+    fable=$(echo "$response" | jq -r '[.limits[]? | select(.scope.model.display_name == "Fable") | .percent] | if length > 0 then (.[0] | floor) else -1 end')
+    [[ "$fable" =~ ^-?[0-9]+$ ]] || fable=-1
 
-    local result="$five $seven $five_reset $seven_reset $extra_enabled $extra_util"
+    local result="$five $seven $five_reset $seven_reset $extra_enabled $extra_util $fable"
     # Always write cache on success — even when the caller didn't request
     # cache use. Costs nothing and means a subsequent --show-usage hit
     # within TTL serves from disk without burning more API quota.
@@ -730,7 +735,7 @@ gather_all_usage() {
         email=$(jq -r --arg num "$num" '.accounts[$num].email // ""' "$SEQUENCE_FILE")
         [[ -z "$email" ]] && continue
 
-        local handicap util_pair five seven five_reset seven_reset
+        local handicap util_pair five seven five_reset seven_reset fable
         local five_rem seven_rem adjusted status now has_extra
         local cache_file cached
         handicap=$(get_account_handicap "$num")
@@ -774,6 +779,9 @@ gather_all_usage() {
             local extra_enabled_live
             extra_enabled_live=$(echo "$util_pair" | awk '{print $5}')
             extra_util=$(echo "$util_pair" | awk '{print $6}')
+            # 7번째 = Fable %. 구버전 캐시(6필드)면 비어 있으므로 -1(미지원) 처리.
+            fable=$(echo "$util_pair" | awk '{print $7}')
+            [[ "$fable" =~ ^-?[0-9]+$ ]] || fable=-1
             if [[ "$extra_enabled_live" == "true" || "$extra_enabled_live" == "false" ]]; then
                 # Live API value supersedes the snapshot from backup config
                 # so plan changes show up immediately.
@@ -843,16 +851,16 @@ gather_all_usage() {
             adjusted=$(( raw_max + handicap - urgency_bonus ))
             (( adjusted < 0 )) && adjusted=0
         else
-            five=""; seven=""; five_rem=""; seven_rem=""; adjusted=""
+            five=""; seven=""; five_rem=""; seven_rem=""; adjusted=""; fable=-1
         fi
 
         # Use ASCII US (\x1f, Unit Separator) instead of tab as the TSV
         # delimiter. Bash `read -r` with IFS=$'\t' treats tab as whitespace
         # and collapses consecutive tabs, dropping empty fields. With a
         # non-whitespace separator, empty fields are preserved.
-        printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\n' \
+        printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\n' \
             "$num" "$email" "$five" "$seven" "$handicap" "$adjusted" "$status" \
-            "$five_rem" "$seven_rem" "$has_extra" "$extra_util"
+            "$five_rem" "$seven_rem" "$has_extra" "$extra_util" "$fable"
     done <<< "$nums"
 }
 
@@ -878,12 +886,14 @@ format_remaining() {
 # Args: current_account_num (used for the "*" active marker).
 render_usage_table() {
     local current_account="${1:-}"
-    printf '%-3s %-2s %-32s %5s %7s %5s %7s %9s %9s %4s\n' \
-        "" "#" "Email" "5h%" "5h-rst" "7d%" "7d-rst" "Handicap" "Adjusted" "Ext"
-    local num email five seven handicap adjusted status five_rem seven_rem has_extra extra_util prefix ext_disp
-    while IFS=$'\x1f' read -r num email five seven handicap adjusted status five_rem seven_rem has_extra extra_util; do
+    printf '%-3s %-2s %-32s %5s %7s %5s %7s %6s %9s %9s %4s\n' \
+        "" "#" "Email" "5h%" "5h-rst" "7d%" "7d-rst" "Fable" "Handicap" "Adjusted" "Ext"
+    local num email five seven handicap adjusted status five_rem seven_rem has_extra extra_util fable prefix ext_disp fable_disp
+    while IFS=$'\x1f' read -r num email five seven handicap adjusted status five_rem seven_rem has_extra extra_util fable; do
         [[ -z "$num" ]] && continue
         if [[ "$num" == "$current_account" ]]; then prefix="*"; else prefix=" "; fi
+        # Fable 컬럼: -1(또는 비어있음)은 이 계정/플랜에 Fable 한도가 없다는 뜻.
+        if [[ "$fable" =~ ^[0-9]+$ ]]; then fable_disp="${fable}%"; else fable_disp="-"; fi
         # Ext column: prefer the live extra_usage.utilization% from the
         # API. Fall back to "yes" (enabled but utilization unknown) when
         # cached/legacy. "-" when extra usage is not enabled.
@@ -897,22 +907,22 @@ render_usage_table() {
             ext_disp="-"
         fi
         if [[ "$status" == "ok" ]]; then
-            printf '%-3s %-2s %-32s %5s %7s %5s %7s %9s %9s %4s\n' \
+            printf '%-3s %-2s %-32s %5s %7s %5s %7s %6s %9s %9s %4s\n' \
                 "$prefix" "$num" "$email" \
                 "$five" "$(format_remaining "$five_rem")" \
                 "$seven" "$(format_remaining "$seven_rem")" \
-                "$handicap" "$adjusted" "$ext_disp"
+                "$fable_disp" "$handicap" "$adjusted" "$ext_disp"
         elif [[ "$status" == "estimated" ]]; then
             # "?" suffix marks values as cached estimates. Reset-time columns
             # interpolate naturally because cached reset epochs are absolute.
-            printf '%-3s %-2s %-32s %5s %7s %5s %7s %9s %9s %4s\n' \
+            printf '%-3s %-2s %-32s %5s %7s %5s %7s %6s %9s %9s %4s\n' \
                 "$prefix" "$num" "$email" \
                 "${five}?" "$(format_remaining "$five_rem")" \
                 "${seven}?" "$(format_remaining "$seven_rem")" \
-                "$handicap" "${adjusted}?" "$ext_disp"
+                "$fable_disp" "$handicap" "${adjusted}?" "$ext_disp"
         else
-            printf '%-3s %-2s %-32s %5s %7s %5s %7s %9s %9s %4s\n' \
-                "$prefix" "$num" "$email" "-" "-" "-" "-" "$handicap" "N/A" "$ext_disp"
+            printf '%-3s %-2s %-32s %5s %7s %5s %7s %6s %9s %9s %4s\n' \
+                "$prefix" "$num" "$email" "-" "-" "-" "-" "-" "$handicap" "N/A" "$ext_disp"
         fi
     done
 }
@@ -958,8 +968,11 @@ pick_from_usage_data() {
     local maxed_extra_alt_num="" maxed_extra_alt_eu="" maxed_extra_alt_adj=""
     local maxed_noextra_num="" maxed_noextra_score="" maxed_noextra_rem=""
     local blocked_num="" blocked_score=""
-    local num email five seven handicap adjusted status five_rem seven_rem has_extra extra_util
-    while IFS=$'\x1f' read -r num email five seven handicap adjusted status five_rem seven_rem has_extra extra_util; do
+    local num email five seven handicap adjusted status five_rem seven_rem has_extra extra_util fable
+    # Fable 우선 선택용 수집기. healthy tier 안에서 "Fable 여유 있는 계정" 을
+    # 별도로 모아, 있으면 그쪽을 먼저 쓴다. 전부 소진(100%)되면 기존 로직대로.
+    local fable_num="" fable_score="" fable_rem=""
+    while IFS=$'\x1f' read -r num email five seven handicap adjusted status five_rem seven_rem has_extra extra_util fable; do
         [[ -z "$num" ]] && continue
         if [[ "$status" == "unavailable" ]]; then
             if [[ -z "$stale_num" ]] || (( num < stale_num )); then
@@ -1046,6 +1059,18 @@ pick_from_usage_data() {
             elif (( adjusted == healthy_score && seven_rem_norm < healthy_rem )); then
                 healthy_num="$num"; healthy_score="$adjusted"; healthy_rem="$seven_rem_norm"
             fi
+            # Fable 여유가 남은 계정(0 <= fable < 100)만 따로 모은다.
+            # 정렬 키는 Fable 사용률 오름차순(가장 많이 남은 순), 동률이면
+            # adjusted, 그 다음 7d reset 임박 순.
+            if [[ "$fable" =~ ^[0-9]+$ ]] && (( fable < 100 )); then
+                if [[ -z "$fable_num" ]]; then
+                    fable_num="$num"; fable_score="$fable"; fable_rem="$adjusted"
+                elif (( fable < fable_score )); then
+                    fable_num="$num"; fable_score="$fable"; fable_rem="$adjusted"
+                elif (( fable == fable_score && adjusted < fable_rem )); then
+                    fable_num="$num"; fable_score="$fable"; fable_rem="$adjusted"
+                fi
+            fi
         elif [[ "$has_extra" == "true" ]]; then
             # maxed-with-extra. Treat all candidates as equal-priority
             # (every pick costs paid overage), but prefer "not current" so
@@ -1085,6 +1110,10 @@ pick_from_usage_data() {
         echo "$stale_num"
     elif [[ -n "$cold_num" ]]; then
         echo "$cold_num"
+    elif [[ -n "$fable_num" ]]; then
+        # Fable 여유가 남은 계정을 healthy 보다 먼저 쓴다 (사용자 요청).
+        # Fable 이 전 계정 소진되면 이 변수가 비어 아래 healthy 로 넘어간다.
+        echo "$fable_num"
     elif [[ -n "$healthy_num" ]]; then
         echo "$healthy_num"
     elif [[ -n "$maxed_extra_alt_num" ]]; then

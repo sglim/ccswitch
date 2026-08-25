@@ -80,15 +80,17 @@ sat_emoji() {
 
 # ============ Menu-bar header (always one line) ============
 if [[ -n "$active_num" && -f "$CACHE_DIR/account-$active_num" ]]; then
-    read -r f s _ _ ext_en ext_u < "$CACHE_DIR/account-$active_num"
+    read -r f s _ _ ext_en ext_u fbl < "$CACHE_DIR/account-$active_num"
     emoji=$(sat_emoji "$f" "$s")
     # Format: "🟢 #1  5h:5% 7d:1%  ext:0%"
     # Earlier compact "5/1" looked like a date (May 1). Labeling each
     # value with its window removes the date/ratio ambiguity.
+    # Fable 은 별도 주간 한도라 메뉴바에도 같이 띄운다. -1/빈값은 미지원.
+    if [[ "$fbl" =~ ^[0-9]+$ ]]; then fbl_hdr=" fable:${fbl}%"; else fbl_hdr=""; fi
     if [[ "$ext_en" == "true" && -n "$ext_u" ]]; then
-        echo "${emoji} #${active_num}  5h:${f:-?}% 7d:${s:-?}%  ext:${ext_u}%"
+        echo "${emoji} #${active_num}  5h:${f:-?}% 7d:${s:-?}%${fbl_hdr}  ext:${ext_u}%"
     else
-        echo "${emoji} #${active_num}  5h:${f:-?}% 7d:${s:-?}%"
+        echo "${emoji} #${active_num}  5h:${f:-?}% 7d:${s:-?}%${fbl_hdr}"
     fi
 elif [[ -n "$active_num" ]]; then
     echo "❓ ${active_num}: no cache"
@@ -103,7 +105,7 @@ echo "ccswitch — cache only (no API call) | color=#888888 size=10"
 echo "---"
 
 # Column header
-printf '%s\n' "  # Email                              5h%  5h-rst   7d%  7d-rst   Ext | font=Menlo size=11 trim=false"
+printf '%s\n' "  # Email                              5h%  5h-rst   7d%  7d-rst  Fable   Ext | font=Menlo size=11 trim=false"
 
 # Per-account rows
 nums=$(jq -r '.accounts | keys | map(tonumber) | sort | .[]' "$SEQUENCE_FILE")
@@ -117,7 +119,7 @@ while read -r num; do
     if [[ -f "$cache" ]]; then
         # Cache may have 4 fields (legacy) or 6 fields. Trailing fields just
         # come back empty; that's fine.
-        read -r five seven five_r seven_r ext_en ext_u < "$cache"
+        read -r five seven five_r seven_r ext_en ext_u fbl < "$cache"
         five_r=${five_r:-0}; seven_r=${seven_r:-0}
         five_rem=$(( five_r > now ? five_r - now : 0 ))
         seven_rem=$(( seven_r > now ? seven_r - now : 0 ))
@@ -130,11 +132,12 @@ while read -r num; do
         else
             ext_disp="—"
         fi
-        line=$(printf '%s %2s %-32s %3s%%  %-6s  %3s%%  %-6s   %s' \
+        if [[ "$fbl" =~ ^[0-9]+$ ]]; then fbl_disp="${fbl}%"; else fbl_disp="—"; fi
+        line=$(printf '%s %2s %-32s %3s%%  %-6s  %3s%%  %-6s  %5s  %s' \
             "$prefix" "$num" "${email:0:32}" \
             "${five:-0}" "$(fmt_rem "$five_rem")" \
             "${seven:-0}" "$(fmt_rem "$seven_rem")" \
-            "$ext_disp")
+            "$fbl_disp" "$ext_disp")
     else
         line=$(printf '%s %2s %-32s   (no cache yet)' "$prefix" "$num" "${email:0:32}")
     fi
