@@ -132,13 +132,14 @@ urgency_bonus = max(0, 48 − binding_window_hours_until_reset)   # 48h 램프
 | # | Tier | 진입 조건 |
 |---|---|---|
 | 1 | **stale** | `status=="unavailable"` — 토큰 만료, switch 로 refresh 유도 |
-| 2 | **cold** | `5h=0` + `5h_reset` 없음 + `7d != 100` — 5h 클럭 시작 목적 |
+| 2 | **cold (Fable 여유)** | `5h=0` + `5h_reset` 없음 + `7d != 100` **이면서 Fable 잔량 있음**(0~99%) — 5h 클럭 시작 목적 |
 | 3 | **fable-first** | healthy 계정 중 **Fable 주간 한도에 여유가 남은**(0~99%) 계정. Fable 사용률이 낮은(=많이 남은) 순. Fable 은 별도 주간 한도라 남아 있으면 먼저 쓰는 게 이득 |
-| 4 | **healthy** | 두 윈도우 모두 100% 미만. handicap 유무 무관 — handicap 은 `adjusted` 점수에만 반영되고 tier 를 나누지 않음. 따라서 handicap 계정이라도 adjusted 가 최저면 이 tier 에서 선택됨 |
-| 5 | **maxed-with-extra (alt)** | 한 윈도우 100% 이지만 `hasExtraUsageEnabled` 이고 **현재 active 가 아닌** 계정 — 동등 후보 간 round-robin |
-| 6 | **maxed-with-extra** | 4번과 동일하나 `current` 가 유일 후보일 때 |
-| 7 | **maxed-no-extra** | 한 윈도우 100%, extra-usage 없음 |
-| 8 | **blocked-handicap** | `handicap > 0 && raw_max + handicap >= 100` — handicap 포함 사용률이 100% 이상인 계정은 실사용에 여유가 있어도 최후의 fallback 으로만 선택 (handicap 의 "이 계정 아끼기" 의도를 지키는 안전장치) |
+| 4 | **cold (Fable 소진)** | cold 조건은 맞지만 Fable 이 100%(또는 미지원)인 계정. Fable 잔량이 tier 보다 우선하므로 여기로 밀린다 |
+| 5 | **healthy** | 두 윈도우 모두 100% 미만. handicap 유무 무관 — handicap 은 `adjusted` 점수에만 반영되고 tier 를 나누지 않음. 따라서 handicap 계정이라도 adjusted 가 최저면 이 tier 에서 선택됨 |
+| 6 | **maxed-with-extra (alt)** | 한 윈도우 100% 이지만 `hasExtraUsageEnabled` 이고 **현재 active 가 아닌** 계정 — 동등 후보 간 round-robin |
+| 7 | **maxed-with-extra** | 4번과 동일하나 `current` 가 유일 후보일 때 |
+| 8 | **maxed-no-extra** | 한 윈도우 100%, extra-usage 없음 |
+| 9 | **blocked-handicap** | `handicap > 0 && raw_max + handicap >= 100` — handicap 포함 사용률이 100% 이상인 계정은 실사용에 여유가 있어도 최후의 fallback 으로만 선택 (handicap 의 "이 계정 아끼기" 의도를 지키는 안전장치) |
 
 ### Tie-break
 

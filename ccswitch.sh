@@ -960,6 +960,9 @@ pick_from_usage_data() {
     local current_num="${1:-}"
     local stale_num=""
     local cold_num="" cold_score="" cold_rem=""
+    # cold 도 Fable 여유 유무로 갈라 담는다. Fable 이 남은 계정이 하나라도
+    # 있으면 소진된 계정은 어떤 tier 로도 이기지 못하게 하기 위함.
+    local cold_fable_num="" cold_fable_score="" cold_fable_rem=""
     local healthy_num="" healthy_score="" healthy_rem=""
     # maxed-extra has two collectors: "_alt" excludes the current active
     # num to enforce round-robin; the unsuffixed one keeps every ext
@@ -1030,12 +1033,24 @@ pick_from_usage_data() {
         if [[ "$five" == "0" \
               && ( -z "$five_rem" || "$five_rem" == "0" ) \
               && "$seven" != "100" ]]; then
-            if [[ -z "$cold_num" ]]; then
-                cold_num="$num"; cold_score="$adjusted"; cold_rem="$seven_rem_norm"
-            elif (( adjusted < cold_score )); then
-                cold_num="$num"; cold_score="$adjusted"; cold_rem="$seven_rem_norm"
-            elif (( adjusted == cold_score && seven_rem_norm < cold_rem )); then
-                cold_num="$num"; cold_score="$adjusted"; cold_rem="$seven_rem_norm"
+            if [[ "$fable" =~ ^[0-9]+$ ]] && (( fable < 100 )); then
+                # Fable 여유 있는 cold — 최우선 그룹.
+                if [[ -z "$cold_fable_num" ]]; then
+                    cold_fable_num="$num"; cold_fable_score="$adjusted"; cold_fable_rem="$seven_rem_norm"
+                elif (( adjusted < cold_fable_score )); then
+                    cold_fable_num="$num"; cold_fable_score="$adjusted"; cold_fable_rem="$seven_rem_norm"
+                elif (( adjusted == cold_fable_score && seven_rem_norm < cold_fable_rem )); then
+                    cold_fable_num="$num"; cold_fable_score="$adjusted"; cold_fable_rem="$seven_rem_norm"
+                fi
+            else
+                # Fable 소진(100%) 또는 미지원(-1) — 후순위 그룹.
+                if [[ -z "$cold_num" ]]; then
+                    cold_num="$num"; cold_score="$adjusted"; cold_rem="$seven_rem_norm"
+                elif (( adjusted < cold_score )); then
+                    cold_num="$num"; cold_score="$adjusted"; cold_rem="$seven_rem_norm"
+                elif (( adjusted == cold_score && seven_rem_norm < cold_rem )); then
+                    cold_num="$num"; cold_score="$adjusted"; cold_rem="$seven_rem_norm"
+                fi
             fi
         fi
         # Saturation classification.
@@ -1108,12 +1123,16 @@ pick_from_usage_data() {
     done
     if [[ -n "$stale_num" ]]; then
         echo "$stale_num"
-    elif [[ -n "$cold_num" ]]; then
-        echo "$cold_num"
+    elif [[ -n "$cold_fable_num" ]]; then
+        # ── Fable 여유가 있는 그룹 (cold → healthy) ──────────────────
+        # Fable 잔량이 tier 보다 우선한다. 예전엔 cold 가 fable 보다 위라
+        # Fable 100% 계정이 "5h 가 0" 이라는 이유만으로 계속 뽑혔다.
+        echo "$cold_fable_num"
     elif [[ -n "$fable_num" ]]; then
-        # Fable 여유가 남은 계정을 healthy 보다 먼저 쓴다 (사용자 요청).
-        # Fable 이 전 계정 소진되면 이 변수가 비어 아래 healthy 로 넘어간다.
         echo "$fable_num"
+    elif [[ -n "$cold_num" ]]; then
+        # ── 여기부터 Fable 소진/미지원 그룹 ───────────────────────────
+        echo "$cold_num"
     elif [[ -n "$healthy_num" ]]; then
         echo "$healthy_num"
     elif [[ -n "$maxed_extra_alt_num" ]]; then
@@ -1762,12 +1781,20 @@ cmd_show_usage() {
                 return 0
             fi
         fi
+        local target_fable
+        target_fable=$(echo "$data" | /usr/bin/awk -F$'\x1f' -v n="$target" '$1==n{print $12}')
+        local fable_note=""
+        if [[ "$target_fable" =~ ^[0-9]+$ ]] && (( target_fable < 100 )); then
+            fable_note=", Fable ${target_fable}%"
+        elif [[ "$target_fable" == "100" ]]; then
+            fable_note=", Fable 소진"
+        fi
         if [[ "$target_status" == "unavailable" ]]; then
             echo "Next target: Account-$target (stale-token refresh)"
         elif [[ "$target_five" == "0" \
                 && ( -z "$target_five_rem" || "$target_five_rem" == "0" ) \
                 && "$target_seven" != "100" ]]; then
-            echo "Next target: Account-$target (cold-warmup — 5h window untouched)"
+            echo "Next target: Account-$target (cold-warmup — 5h window untouched${fable_note})"
         elif [[ "$target_five" == "100" || "$target_seven" == "100" ]]; then
             if [[ "$target_extra" == "true" ]]; then
                 echo "Next target: Account-$target (saturated but has extra-usage)"
@@ -1775,7 +1802,7 @@ cmd_show_usage() {
                 echo "Next target: Account-$target (last-resort: all saturated, no extra-usage)"
             fi
         else
-            echo "Next target: Account-$target (lowest adjusted)"
+            echo "Next target: Account-$target (lowest adjusted${fable_note})"
         fi
     fi
 }
