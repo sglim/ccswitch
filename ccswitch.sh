@@ -831,11 +831,16 @@ gather_all_usage() {
             # away — urgency tips the scale only between near-equal
             # candidates or when an account is about to refresh and
             # another is sitting on weeks of stale cap.
-            local raw_max bind_rem
+            # 임계는 binding 창의 길이에 맞춘다. 48h 는 7d 창을 전제로 고른
+            # 값이라, 5h 창이 binding 일 때 그대로 쓰면 남은 시간이 항상
+            # 5시간 미만이라 보너스가 매번 44~48 이 되어 raw_max 를 통째로
+            # 덮어쓴다. 그러면 5h 9% 와 5h 38% 가 똑같이 adjusted 0 이 되어
+            # picker 가 둘을 구분하지 못한다.
+            local raw_max bind_rem urgency_window
             if (( five > seven )); then
-                raw_max=$five; bind_rem=$five_rem
+                raw_max=$five; bind_rem=$five_rem; urgency_window=5
             else
-                raw_max=$seven; bind_rem=$seven_rem
+                raw_max=$seven; bind_rem=$seven_rem; urgency_window=48
             fi
             local urgency_bonus=0
             # Skip urgency for handicapped accounts. Handicap's whole
@@ -844,8 +849,8 @@ gather_all_usage() {
             # whose 5h is about to reset to the top of the picker.
             if (( handicap == 0 )) && [[ "$bind_rem" =~ ^[0-9]+$ ]] && (( bind_rem > 0 )); then
                 local bind_hours=$(( bind_rem / 3600 ))
-                if (( bind_hours < 48 )); then
-                    urgency_bonus=$(( 48 - bind_hours ))
+                if (( bind_hours < urgency_window )); then
+                    urgency_bonus=$(( urgency_window - bind_hours ))
                 fi
             fi
             adjusted=$(( raw_max + handicap - urgency_bonus ))
