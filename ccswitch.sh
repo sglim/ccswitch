@@ -727,6 +727,22 @@ fetch_account_utilization() {
 
 # Read this account's handicap from sequence.json.
 # Args: account_num. Missing / null / non-integer yields 0.
+# Fable 전용 handicap. 일반 handicap 과 별개로, "이 계정의 Fable 은
+# 마지막에 써라" 를 표현한다. picker 는 fable + fable_handicap 을
+# 유효값으로 보고, 그게 100 이상이면 Fable 여유 그룹에서 빠진다.
+# 즉 100 을 주면 다른 계정 Fable 이 전부 소진된 뒤에야 쓰인다.
+get_account_fable_handicap() {
+    local account_num="$1"
+    [[ -f "$SEQUENCE_FILE" ]] || { echo 0; return; }
+    local h
+    h=$(jq -r --arg num "$account_num" '.accounts[$num].fableHandicap // 0' "$SEQUENCE_FILE" 2>/dev/null)
+    if [[ "$h" =~ ^[0-9]+$ ]]; then
+        echo "$h"
+    else
+        echo 0
+    fi
+}
+
 get_account_handicap() {
     local account_num="$1"
     [[ -f "$SEQUENCE_FILE" ]] || { echo 0; return; }
@@ -887,9 +903,11 @@ gather_all_usage() {
         # delimiter. Bash `read -r` with IFS=$'\t' treats tab as whitespace
         # and collapses consecutive tabs, dropping empty fields. With a
         # non-whitespace separator, empty fields are preserved.
-        printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\n' \
+        local fable_hc
+        fable_hc=$(get_account_fable_handicap "$num")
+        printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\n' \
             "$num" "$email" "$five" "$seven" "$handicap" "$adjusted" "$status" \
-            "$five_rem" "$seven_rem" "$has_extra" "$extra_util" "$fable"
+            "$five_rem" "$seven_rem" "$has_extra" "$extra_util" "$fable" "$fable_hc"
     done <<< "$nums"
 }
 
@@ -915,14 +933,24 @@ format_remaining() {
 # Args: current_account_num (used for the "*" active marker).
 render_usage_table() {
     local current_account="${1:-}"
-    printf '%-3s %-2s %-32s %5s %7s %5s %7s %6s %9s %9s %4s\n' \
+    printf '%-3s %-2s %-32s %5s %7s %5s %7s %8s %9s %9s %4s\n' \
         "" "#" "Email" "5h%" "5h-rst" "7d%" "7d-rst" "Fable" "Handicap" "Adjusted" "Ext"
-    local num email five seven handicap adjusted status five_rem seven_rem has_extra extra_util fable prefix ext_disp fable_disp
-    while IFS=$'\x1f' read -r num email five seven handicap adjusted status five_rem seven_rem has_extra extra_util fable; do
+    local num email five seven handicap adjusted status five_rem seven_rem has_extra extra_util fable fable_hc prefix ext_disp fable_disp
+    while IFS=$'\x1f' read -r num email five seven handicap adjusted status five_rem seven_rem has_extra extra_util fable fable_hc; do
         [[ -z "$num" ]] && continue
         if [[ "$num" == "$current_account" ]]; then prefix="*"; else prefix=" "; fi
         # Fable 컬럼: -1(또는 비어있음)은 이 계정/플랜에 Fable 한도가 없다는 뜻.
-        if [[ "$fable" =~ ^[0-9]+$ ]]; then fable_disp="${fable}%"; else fable_disp="-"; fi
+        # Fable handicap 이 걸려 있으면 "53+100" 처럼 붙여 보여준다.
+        # 왜 안 뽑히는지 표에서 바로 보이게 하기 위함.
+        if [[ "$fable" =~ ^[0-9]+$ ]]; then
+            if [[ "$fable_hc" =~ ^[0-9]+$ ]] && (( fable_hc > 0 )); then
+                fable_disp="${fable}+${fable_hc}"
+            else
+                fable_disp="${fable}%"
+            fi
+        else
+            fable_disp="-"
+        fi
         # Ext column: prefer the live extra_usage.utilization% from the
         # API. Fall back to "yes" (enabled but utilization unknown) when
         # cached/legacy. "-" when extra usage is not enabled.
@@ -936,7 +964,7 @@ render_usage_table() {
             ext_disp="-"
         fi
         if [[ "$status" == "ok" ]]; then
-            printf '%-3s %-2s %-32s %5s %7s %5s %7s %6s %9s %9s %4s\n' \
+            printf '%-3s %-2s %-32s %5s %7s %5s %7s %8s %9s %9s %4s\n' \
                 "$prefix" "$num" "$email" \
                 "$five" "$(format_remaining "$five_rem")" \
                 "$seven" "$(format_remaining "$seven_rem")" \
@@ -944,13 +972,13 @@ render_usage_table() {
         elif [[ "$status" == "estimated" ]]; then
             # "?" suffix marks values as cached estimates. Reset-time columns
             # interpolate naturally because cached reset epochs are absolute.
-            printf '%-3s %-2s %-32s %5s %7s %5s %7s %6s %9s %9s %4s\n' \
+            printf '%-3s %-2s %-32s %5s %7s %5s %7s %8s %9s %9s %4s\n' \
                 "$prefix" "$num" "$email" \
                 "${five}?" "$(format_remaining "$five_rem")" \
                 "${seven}?" "$(format_remaining "$seven_rem")" \
                 "$fable_disp" "$handicap" "${adjusted}?" "$ext_disp"
         else
-            printf '%-3s %-2s %-32s %5s %7s %5s %7s %6s %9s %9s %4s\n' \
+            printf '%-3s %-2s %-32s %5s %7s %5s %7s %8s %9s %9s %4s\n' \
                 "$prefix" "$num" "$email" "-" "-" "-" "-" "-" "$handicap" "N/A" "$ext_disp"
         fi
     done
@@ -1000,12 +1028,22 @@ pick_from_usage_data() {
     local maxed_extra_alt_num="" maxed_extra_alt_eu="" maxed_extra_alt_adj=""
     local maxed_noextra_num="" maxed_noextra_score="" maxed_noextra_rem=""
     local blocked_num="" blocked_score=""
-    local num email five seven handicap adjusted status five_rem seven_rem has_extra extra_util fable
+    local num email five seven handicap adjusted status five_rem seven_rem has_extra extra_util fable fable_hc
     # Fable 우선 선택용 수집기. healthy tier 안에서 "Fable 여유 있는 계정" 을
     # 별도로 모아, 있으면 그쪽을 먼저 쓴다. 전부 소진(100%)되면 기존 로직대로.
     local fable_num="" fable_score="" fable_rem=""
-    while IFS=$'\x1f' read -r num email five seven handicap adjusted status five_rem seven_rem has_extra extra_util fable; do
+    while IFS=$'\x1f' read -r num email five seven handicap adjusted status five_rem seven_rem has_extra extra_util fable fable_hc; do
         [[ -z "$num" ]] && continue
+        # 유효 Fable = 실제 사용률 + 계정별 Fable handicap.
+        # handicap 100 을 주면 유효값이 항상 100 이상이라 Fable 여유 그룹에서
+        # 빠지고, 결과적으로 그 계정 Fable 은 가장 마지막에 쓰이게 된다.
+        # Fable 미지원(-1)은 handicap 과 무관하게 -1 로 유지한다.
+        local fable_eff="$fable"
+        if [[ "$fable" =~ ^[0-9]+$ ]]; then
+            [[ "$fable_hc" =~ ^[0-9]+$ ]] || fable_hc=0
+            fable_eff=$(( fable + fable_hc ))
+            (( fable_eff > 100 )) && fable_eff=100
+        fi
         if [[ "$status" == "unavailable" ]]; then
             if [[ -z "$stale_num" ]] || (( num < stale_num )); then
                 stale_num="$num"
@@ -1063,7 +1101,7 @@ pick_from_usage_data() {
               && ( -z "$five_rem" || "$five_rem" == "0" ) \
               && "$seven" != "100" ]]; then
             if fable_priority_enabled \
-               && [[ "$fable" =~ ^[0-9]+$ ]] && (( fable < 100 )); then
+               && [[ "$fable_eff" =~ ^[0-9]+$ ]] && (( fable_eff < 100 )); then
                 # Fable 여유 있는 cold — 최우선 그룹 (Fable 우선 모드일 때만).
                 if [[ -z "$cold_fable_num" ]]; then
                     cold_fable_num="$num"; cold_fable_score="$adjusted"; cold_fable_rem="$seven_rem_norm"
@@ -1108,13 +1146,13 @@ pick_from_usage_data() {
             # 정렬 키는 Fable 사용률 오름차순(가장 많이 남은 순), 동률이면
             # adjusted, 그 다음 7d reset 임박 순.
             if fable_priority_enabled \
-               && [[ "$fable" =~ ^[0-9]+$ ]] && (( fable < 100 )); then
+               && [[ "$fable_eff" =~ ^[0-9]+$ ]] && (( fable_eff < 100 )); then
                 if [[ -z "$fable_num" ]]; then
-                    fable_num="$num"; fable_score="$fable"; fable_rem="$adjusted"
-                elif (( fable < fable_score )); then
-                    fable_num="$num"; fable_score="$fable"; fable_rem="$adjusted"
-                elif (( fable == fable_score && adjusted < fable_rem )); then
-                    fable_num="$num"; fable_score="$fable"; fable_rem="$adjusted"
+                    fable_num="$num"; fable_score="$fable_eff"; fable_rem="$adjusted"
+                elif (( fable_eff < fable_score )); then
+                    fable_num="$num"; fable_score="$fable_eff"; fable_rem="$adjusted"
+                elif (( fable_eff == fable_score && adjusted < fable_rem )); then
+                    fable_num="$num"; fable_score="$fable_eff"; fable_rem="$adjusted"
                 fi
             fi
         elif [[ "$has_extra" == "true" ]]; then
@@ -1620,9 +1658,14 @@ cmd_tick() {
             ncache="$USAGE_CACHE_DIR/account-$n"
             [[ -f "$ncache" ]] || continue
             cfable=$(awk '{print $7}' "$ncache" 2>/dev/null)
-            if [[ "$cfable" =~ ^[0-9]+$ ]] && (( cfable < 100 )); then
-                any_fable_left=1
-                break
+            if [[ "$cfable" =~ ^[0-9]+$ ]]; then
+                # 캐시엔 handicap 이 없으므로 sequence.json 에서 읽어 더한다.
+                local chc
+                chc=$(get_account_fable_handicap "$n")
+                if (( cfable + chc < 100 )); then
+                    any_fable_left=1
+                    break
+                fi
             fi
         done
     fi
@@ -1637,9 +1680,15 @@ cmd_tick() {
         since=$(( now_s - nseven_reset ))
         if (( since >= 0 && since < reset_window )); then
             nfable=$(awk '{print $7}' "$ncache" 2>/dev/null)
+            local nhc=0
+            [[ "$nfable" =~ ^[0-9]+$ ]] && nhc=$(get_account_fable_handicap "$n")
             if (( any_fable_left == 1 )) \
-               && [[ "$nfable" =~ ^[0-9]+$ ]] && (( nfable >= 100 )); then
-                echo "[$(date '+%Y-%m-%d %H:%M:%S')] Account-$n 7d window just reset but Fable exhausted (${nfable}%) — skipping fast-path."
+               && [[ "$nfable" =~ ^[0-9]+$ ]] && (( nfable + nhc >= 100 )); then
+                if (( nhc > 0 )); then
+                    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Account-$n 7d window just reset but Fable ${nfable}% + handicap ${nhc} >= 100 — skipping fast-path."
+                else
+                    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Account-$n 7d window just reset but Fable exhausted (${nfable}%) — skipping fast-path."
+                fi
                 continue
             fi
             echo "[$(date '+%Y-%m-%d %H:%M:%S')] Account-$n 7d window just reset — switching now."
@@ -1750,6 +1799,49 @@ cmd_switch_lowest() {
 # Set a per-account handicap (percentage points added to that account's
 # utilization before the lowest-usage comparison). Higher handicap means
 # the account is picked less often.
+cmd_set_fable_handicap() {
+    if [[ $# -lt 2 ]]; then
+        echo "Usage: $0 --set-fable-handicap <account_number> <percent>"
+        echo "  100 = 이 계정의 Fable 을 가장 마지막에 사용 (다른 계정이 모두 소진된 뒤)"
+        echo "    0 = 기본 (Fable 잔량 그대로 평가)"
+        exit 1
+    fi
+    local account_num="$1" percent="$2"
+    if ! [[ "$account_num" =~ ^[0-9]+$ ]]; then
+        echo "Error: account number must be a positive integer"; exit 1
+    fi
+    if ! [[ "$percent" =~ ^[0-9]+$ ]] || (( percent < 0 || percent > 100 )); then
+        echo "Error: percent must be an integer in [0, 100]"; exit 1
+    fi
+    if [[ ! -f "$SEQUENCE_FILE" ]]; then
+        echo "Error: No accounts are managed yet"; exit 1
+    fi
+    local email
+    email=$(jq -r --arg num "$account_num" '.accounts[$num].email // ""' "$SEQUENCE_FILE")
+    if [[ -z "$email" ]]; then
+        echo "Error: Account-$account_num does not exist"; exit 1
+    fi
+    local updated
+    updated=$(jq --arg num "$account_num" --argjson pct "$percent" --arg now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+        .accounts[$num].fableHandicap = $pct |
+        .lastUpdated = $now
+    ' "$SEQUENCE_FILE")
+    if [[ -z "$updated" ]]; then
+        echo "Error: failed to update $SEQUENCE_FILE"; exit 1
+    fi
+    printf '%s\n' "$updated" > "$SEQUENCE_FILE"
+    if (( percent >= 100 )); then
+        echo "Account-$account_num ($email) Fable handicap = ${percent} — 이 계정의 Fable 은 가장 마지막에 사용됩니다."
+    elif (( percent == 0 )); then
+        echo "Account-$account_num ($email) Fable handicap 해제 (0)"
+    else
+        echo "Account-$account_num ($email) Fable handicap = ${percent} — 유효 Fable 사용률에 ${percent}%p 가산됩니다."
+    fi
+    if ! fable_priority_enabled; then
+        echo "Note: Fable 우선 모드가 꺼져 있어 지금은 선택에 영향이 없습니다. --fable-priority on 으로 켜세요."
+    fi
+}
+
 cmd_fable_priority() {
     local arg="${1:-}"
     if [[ ! -f "$SEQUENCE_FILE" ]]; then
@@ -2376,6 +2468,7 @@ show_usage() {
     echo "  --show-usage                               Print per-account 5h/7d utilization + handicap table"
     echo "  --set-handicap <num> <percent>             Set per-account handicap (0-100); higher = picked less often"
     echo "  --fable-priority [on|off]                  Prefer accounts with Fable quota left (default: off; no arg = show status)"
+    echo "  --set-fable-handicap <num> <percent>       Per-account Fable handicap (0-100); 100 = use that account's Fable last"
     echo "  --sync-current                             Refresh current account's backup from live state"
     echo "  --agent-install                            Install/update the macOS LaunchAgent (recommended on macOS)"
     echo "  --agent-status                             Show LaunchAgent state (launchctl print)"
@@ -2447,6 +2540,10 @@ main() {
         --fable-priority)
             shift
             cmd_fable_priority "${1:-}"
+            ;;
+        --set-fable-handicap)
+            shift
+            cmd_set_fable_handicap "$@"
             ;;
         --sync-current)
             cmd_sync_current

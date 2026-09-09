@@ -100,6 +100,7 @@ Next target: Account-3 (cold-warmup — 5h window untouched)
 | `--show-usage` | 사용량 표 출력 (switch 안 함, 10초 API 캐시 활용) |
 | `--set-handicap <num> <pct>` | 계정별 handicap 설정 (0–100); 클수록 picker 가 회피 |
 | `--fable-priority [on\|off]` | **Fable 우선 모드** 토글 (기본 off). 인자 없이 실행하면 현재 상태 표시 |
+| `--set-fable-handicap <num> <pct>` | 계정별 **Fable handicap** (0–100). 100 = 그 계정 Fable 을 가장 마지막에 사용 |
 | `--sync-current` | 현재 계정 백업을 live 키체인/config 로 새로고침 |
 | `--agent-install` | macOS LaunchAgent 설치 (매분 `--tick`) |
 | `--tick` | LaunchAgent 용 1분 tick: ①현재 계정 100% 포화 시 즉시 전환 ②다른 계정의 7d 주간한도가 방금 리셋되면 그 계정으로 즉시 전환 ③매시 `:00` 정기 switch-lowest. 그 외엔 no-op |
@@ -148,6 +149,20 @@ ccswitch.sh --fable-priority        # 현재 상태 확인
 ```bash
 CCSWITCH_FABLE_PRIORITY=on ccswitch.sh --switch-lowest
 ```
+
+#### 특정 계정의 Fable 을 마지막에 쓰기
+
+"이 계정 Fable 은 아껴두고 싶다" 는 경우 계정별 Fable handicap 을 겁니다. 일반 `handicap` 과 별개이며, **유효 Fable = 실제 사용률 + handicap** 으로 평가합니다.
+
+```bash
+ccswitch.sh --set-fable-handicap 4 100   # Account-4 Fable 을 가장 마지막에
+ccswitch.sh --set-fable-handicap 4 30    # 30%p 만큼 후순위로
+ccswitch.sh --set-fable-handicap 4 0     # 해제
+```
+
+`100` 을 주면 유효값이 항상 100 이상이 되어 Fable 여유 그룹에서 빠지고, **다른 계정 Fable 이 전부 소진된 뒤에야** 쓰입니다. 표에서는 `Fable` 컬럼이 `53+100` 처럼 표시돼 왜 안 뽑히는지 바로 보입니다.
+
+설정은 `sequence.json` 의 `.accounts[num].fableHandicap` 에 저장되고, Fable 우선 모드가 **off 면 무시**됩니다.
 
 on 일 때는 `--tick` 의 7d 리셋 fast-path 도 같은 규칙을 따릅니다 — Fable 여유 계정이 있으면 Fable 소진 계정으로는 점프하지 않습니다.
 
