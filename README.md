@@ -125,6 +125,7 @@ urgency_bonus = max(0, 48 − binding_window_hours_until_reset)   # 48h 램프
 ```
 
 - `binding_window` = 5h/7d 중 사용률이 더 높은 쪽 (먼저 rate-limit 걸리는 윈도우).
+- `urgency_bonus` 는 **이미 포화(raw_max ≥ 100)된 계정에는 적용되지 않음** — "곧 리셋되니 지금 써라" 는 전제가 쓸 게 남아 있을 때만 성립한다. 이 예외가 없으면 7d=100 인 계정이 `adjusted 66` 처럼 보여 hysteresis 가 전환을 막는다.
 - `urgency_bonus` 는 **handicap > 0 일 때는 적용되지 않음** — "덜 써라" 와 "임박했으니 써라" 가 서로 상쇄되는 걸 막기 위함.
 - **Fable** 은 `adjusted` 에 섞지 않는다. Anthropic API 의 `limits[]` 안에 `kind:"weekly_scoped"`, `scope.model.display_name:"Fable"` 로 별도 주간 한도가 오며, picker 는 이를 **tier 우선순위**로만 쓴다. Fable 한도가 없는 계정은 `-1`(미지원)로 저장해 `0%`(여유 만땅)와 구분한다.
 - `blocked-handicap` 판정은 **raw** `max + handicap >= 100` 기준 (urgency 보정 전). 임박 reset 보너스로 차단을 우회하는 것 방지.
@@ -197,7 +198,9 @@ on 일 때는 `--tick` 의 7d 리셋 fast-path 도 같은 규칙을 따릅니다
 CCSWITCH_HYSTERESIS_DELTA=5 ccswitch.sh --switch-lowest
 ```
 
-`stale`, `cold`, `blocked-handicap` 결정은 **hysteresis 무시** — 계정 자체 이슈를 즉시 해소해야 하기 때문.
+**현재 계정이 포화(5h 또는 7d ≥ 100)면 hysteresis 를 적용하지 않습니다** — 붙잡아 둬도 어차피 작업이 안 되므로 세션 유지의 의미가 없습니다.
+
+`stale`, `cold`, `blocked-handicap` 결정도 **hysteresis 무시** — 계정 자체 이슈를 즉시 해소해야 하기 때문.
 
 ---
 

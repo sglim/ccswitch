@@ -887,7 +887,12 @@ gather_all_usage() {
             # point is "leave headroom on this account" — urgency would
             # invert that intent by promoting a handicapped account
             # whose 5h is about to reset to the top of the picker.
-            if (( handicap == 0 )) && [[ "$bind_rem" =~ ^[0-9]+$ ]] && (( bind_rem > 0 )); then
+            # 이미 포화(100%)된 계정엔 urgency 를 주지 않는다. 보너스의 취지는
+            # "곧 리셋되니 남은 걸 지금 써라" 인데, 100% 면 쓸 게 없어서 그
+            # 전제가 성립하지 않는다. 그대로 두면 7d=100 인 죽은 계정이
+            # adjusted 66 처럼 보여 hysteresis 가 전환을 막는다(실제 버그).
+            if (( raw_max < 100 )) \
+               && (( handicap == 0 )) && [[ "$bind_rem" =~ ^[0-9]+$ ]] && (( bind_rem > 0 )); then
                 local bind_hours=$(( bind_rem / 3600 ))
                 if (( bind_hours < urgency_window )); then
                     urgency_bonus=$(( urgency_window - bind_hours ))
@@ -1762,7 +1767,19 @@ cmd_switch_lowest() {
     current_status=$(echo "$data" | /usr/bin/awk -F$'\x1f' -v n="$current_account" '$1==n{print $7}')
     local target_status_pre
     target_status_pre=$(echo "$data" | /usr/bin/awk -F$'\x1f' -v n="$target" '$1==n{print $7}')
-    if [[ "$current_status" == "ok" && "$target_status_pre" == "ok" \
+    # 현재 계정이 이미 포화면 hysteresis 를 적용하지 않는다. "세션 끊김을
+    # 피한다" 는 취지는 지금 계정을 계속 쓸 수 있을 때만 의미가 있고,
+    # 100% 면 어차피 아무 작업도 못 하므로 붙잡아 둘 이유가 없다.
+    local cur_five cur_seven cur_saturated=0
+    cur_five=$(echo "$data" | /usr/bin/awk -F$'\x1f' -v n="$current_account" '$1==n{print $3}')
+    cur_seven=$(echo "$data" | /usr/bin/awk -F$'\x1f' -v n="$current_account" '$1==n{print $4}')
+    if [[ "$cur_five" =~ ^[0-9]+$ ]] && (( cur_five >= 100 )); then cur_saturated=1; fi
+    if [[ "$cur_seven" =~ ^[0-9]+$ ]] && (( cur_seven >= 100 )); then cur_saturated=1; fi
+    if (( cur_saturated == 1 )); then
+        echo "Note: current Account-$current_account is saturated (5h ${cur_five}% / 7d ${cur_seven}%) — bypassing hysteresis."
+    fi
+    if (( cur_saturated == 0 )) \
+       && [[ "$current_status" == "ok" && "$target_status_pre" == "ok" \
           && "$current_adj" =~ ^[0-9]+$ && "$target_adj" =~ ^[0-9]+$ ]]; then
         local delta=$((current_adj - target_adj))
         if (( delta < HYSTERESIS_DELTA )); then
@@ -1986,7 +2003,15 @@ cmd_show_usage() {
         current_adj_p=$(echo "$data" | /usr/bin/awk -F$'\x1f' -v n="$current" '$1==n{print $6}')
         target_adj_p="$(echo "$data" | /usr/bin/awk -F$'\x1f' -v n="$target" '$1==n{print $6}')"
         current_status_p=$(echo "$data" | /usr/bin/awk -F$'\x1f' -v n="$current" '$1==n{print $7}')
-        if [[ "$current_status_p" == "ok" && "$target_status" == "ok" \
+        # cmd_switch_lowest 와 동일하게: 현재 계정이 포화면 hysteresis 미적용.
+        # 여기서 안 맞추면 표의 "Next target" 과 실제 전환 결과가 어긋난다.
+        local cf_p cs_p cur_sat_p=0
+        cf_p=$(echo "$data" | /usr/bin/awk -F$'\x1f' -v n="$current" '$1==n{print $3}')
+        cs_p=$(echo "$data" | /usr/bin/awk -F$'\x1f' -v n="$current" '$1==n{print $4}')
+        [[ "$cf_p" =~ ^[0-9]+$ ]] && (( cf_p >= 100 )) && cur_sat_p=1
+        [[ "$cs_p" =~ ^[0-9]+$ ]] && (( cs_p >= 100 )) && cur_sat_p=1
+        if (( cur_sat_p == 0 )) \
+           && [[ "$current_status_p" == "ok" && "$target_status" == "ok" \
               && "$current_adj_p" =~ ^[0-9]+$ && "$target_adj_p" =~ ^[0-9]+$ ]]; then
             local delta_p=$((current_adj_p - target_adj_p))
             if (( delta_p < HYSTERESIS_DELTA )); then

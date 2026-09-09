@@ -46,6 +46,8 @@ wrapper 스크립트(`agent-switch-lowest`, 이름은 레거시)는 `exec ... ${
 - 캐시/`gather_all_usage` 필드가 7개(+TSV 12컬럼)로 늘었다. 7번째 = **Fable %** (`limits[]` 의 `weekly_scoped` + `scope.model.display_name=="Fable"`). 한도 없는 계정은 `-1`.
 - **Fable 우선 모드는 기본 off**. `fable_priority_enabled()` 가 게이트 — env `CCSWITCH_FABLE_PRIORITY` > `sequence.json` 의 `.settings.fablePriority` > 기본 false 순. off 면 `cold_fable_num`/`fable_num` 수집기가 아예 채워지지 않아 tier 가 예전 구조로 동작하고, tick 의 fast-path 도 `any_fable_left=0` 이라 skip 분기가 죽는다. **Fable 관련 동작을 건드릴 땐 off 경로가 예전과 동일한지 반드시 확인할 것** (다른 사용자 기본값).
 - Picker tier 순서 (중요): stale > **cold-fable** > **fable-first** > cold > healthy >  ← Fable 잔량이 tier 보다 우선. cold 는 Fable 여유 유무로 둘로 갈라진다(`cold_fable_num` / `cold_num`). 이렇게 안 하면 Fable 100% 계정이 "5h 가 0" 이라는 이유만으로 계속 뽑힌다(2026-08 실제 버그). maxed-extra-alt > maxed-extra > maxed-no-extra > blocked-handicap. healthy 는 handicap 유무로 나누지 않음 — handicap 은 `adjusted` 에만 반영되고, handicap 계정도 adjusted 최저면 healthy tier 에서 선택됨. handicap 의 강한 회피는 blocked-handicap(raw+handicap>=100) 에서만 발동. Tie-break: lowest `adjusted` → smallest `seven_rem` (0 은 `+∞` 로 정규화 — 미상 reset 이 이기지 않게) → lowest `num`.
+- adjusted 의 `urgency_bonus` 는 `raw_max < 100` 일 때만 적용. 포화 계정에 보너스를 주면 7d=100 인 죽은 계정이 adjusted 66 으로 보여 hysteresis 가 전환을 막는다(2026-09 실제 버그).
+- Hysteresis 는 **현재 계정이 포화(5h/7d ≥ 100)면 우회**. `cmd_switch_lowest` 와 `cmd_show_usage` 양쪽에 같은 검사가 있어야 표의 "Next target" 과 실제 동작이 일치한다.
 - Hysteresis (`HYSTERESIS_DELTA`, 기본 10%p) 는 current+target 둘 다 `status=="ok"` 일 때만 switch 차단. `stale`/`cold`/`estimated`/`blocked-handicap` 은 우회.
 
 ## 테스트
