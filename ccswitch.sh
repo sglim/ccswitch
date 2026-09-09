@@ -1575,8 +1575,28 @@ cmd_tick() {
     # zero API calls. The window (2 ticks) keeps it from re-firing
     # forever: once picked, the account becomes current and is skipped;
     # otherwise the window simply passes.
-    local reset_window=120 now_s n ncache nseven_reset since
+    #
+    # ⚠️ Fable 을 반드시 함께 본다. 이 경로는 picker(pick_from_usage_data)를
+    # 통째로 우회하기 때문에, 확인하지 않으면 7d 가 리셋될 때마다 Fable 이
+    # 소진된 계정으로 강제 이동한다 (2026-09 실제 버그: 표는 Fable 우선인데
+    # 자동 전환만 계속 Fable 100% 계정으로 갔다).
+    # 규칙: Fable 여유가 남은 계정이 하나라도 있으면, Fable 소진(100%) 계정으로는
+    # fast-path 를 발동하지 않는다. 전부 소진된 상태면 예전처럼 그냥 전환한다.
+    local reset_window=120 now_s n ncache nseven_reset since nfable
     now_s=$(date +%s)
+
+    # 현재 Fable 여유가 남은 계정이 존재하는지 먼저 확인 (캐시만 사용).
+    local any_fable_left=0 cfable
+    for n in $(jq -r '.accounts | keys | map(tonumber) | sort | .[]' "$SEQUENCE_FILE" 2>/dev/null); do
+        ncache="$USAGE_CACHE_DIR/account-$n"
+        [[ -f "$ncache" ]] || continue
+        cfable=$(awk '{print $7}' "$ncache" 2>/dev/null)
+        if [[ "$cfable" =~ ^[0-9]+$ ]] && (( cfable < 100 )); then
+            any_fable_left=1
+            break
+        fi
+    done
+
     for n in $(jq -r '.accounts | keys | map(tonumber) | sort | .[]' "$SEQUENCE_FILE" 2>/dev/null); do
         [[ "$n" == "$current" ]] && continue
         ncache="$USAGE_CACHE_DIR/account-$n"
@@ -1586,6 +1606,12 @@ cmd_tick() {
         (( nseven_reset > 0 )) || continue
         since=$(( now_s - nseven_reset ))
         if (( since >= 0 && since < reset_window )); then
+            nfable=$(awk '{print $7}' "$ncache" 2>/dev/null)
+            if (( any_fable_left == 1 )) \
+               && [[ "$nfable" =~ ^[0-9]+$ ]] && (( nfable >= 100 )); then
+                echo "[$(date '+%Y-%m-%d %H:%M:%S')] Account-$n 7d window just reset but Fable exhausted (${nfable}%) — skipping fast-path."
+                continue
+            fi
             echo "[$(date '+%Y-%m-%d %H:%M:%S')] Account-$n 7d window just reset — switching now."
             cmd_switch_to "$n"
             return 0

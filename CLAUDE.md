@@ -14,7 +14,7 @@ ccswitch 는 **macOS 전용** bash 도구. Anthropic 의 `/api/oauth/usage` API 
 
 LaunchAgent 는 `StartInterval 60` 으로 매분 `--tick` 을 실행. `cmd_tick` 은:
 1. **긴급 포화**: 현재 계정만 1개 fetch → 5h 또는 7d 가 100% 면 즉시 `cmd_switch_lowest` (hysteresis 강제 off, `CCSWITCH_HYSTERESIS_DELTA=0`).
-2. **7d 리셋 fast-path**: 각 계정 캐시의 7d_reset epoch(캐시 field 4)를 확인 — now 가 그 epoch 를 방금(120초 window) 지난 비-current 계정이 있으면 `cmd_switch_to` 로 즉시 그 계정으로. **API 호출 0회** (캐시만 읽음). 120초 window 는 재발동 방지 + stale 캐시(만료 계정의 오래된 reset epoch) 무시 역할.
+2. **7d 리셋 fast-path**: 각 계정 캐시의 7d_reset epoch(캐시 field 4)를 확인 — now 가 그 epoch 를 방금(120초 window) 지난 비-current 계정이 있으면 `cmd_switch_to` 로 즉시 그 계정으로. **API 호출 0회** (캐시만 읽음). ⚠️ **이 경로는 picker 를 우회하므로 Fable(캐시 field 7)을 직접 확인한다** — Fable 여유가 남은 계정이 하나라도 있으면 Fable 100% 계정으로는 발동하지 않는다. 이 검사가 없어서 "표는 Fable 우선인데 자동 전환만 계속 Fable 소진 계정으로 가는" 버그가 있었다(2026-09). 120초 window 는 재발동 방지 + stale 캐시(만료 계정의 오래된 reset epoch) 무시 역할.
 3. **정기**: `date +%M` 이 `00` 이면 (매시 정각) 일반 `cmd_switch_lowest` (전 계정 sweep).
 4. 그 외 분: 무출력 no-op — cron.log 를 조용히 유지하고 분당 API 호출을 active 1개로 제한 (429 회피).
 
