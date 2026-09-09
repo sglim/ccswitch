@@ -55,6 +55,30 @@ readonly USAGE_CACHE_TTL=10
 # every cron tick. Override per-invocation with the env var.
 readonly HYSTERESIS_DELTA="${CCSWITCH_HYSTERESIS_DELTA:-10}"
 
+# Fable 우선 모드. 기본은 꺼짐 — 켜지 않으면 ccswitch 는 예전처럼
+# adjusted(전체 사용량)만 보고 고른다. Fable 을 주력으로 쓰는 사람만
+# 켜면 되고, 그 외 사용자의 동작은 이 플래그가 꺼져 있는 한 바뀌지 않는다.
+#
+# 우선순위: 환경변수 > sequence.json 의 .settings.fablePriority > 기본(off)
+# 결과를 캐시해 두 번째 호출부터는 jq 를 돌리지 않는다.
+_FABLE_PRIORITY_CACHED=""
+fable_priority_enabled() {
+    if [[ -n "$_FABLE_PRIORITY_CACHED" ]]; then
+        [[ "$_FABLE_PRIORITY_CACHED" == "1" ]] && return 0 || return 1
+    fi
+    local v=""
+    if [[ -n "${CCSWITCH_FABLE_PRIORITY:-}" ]]; then
+        v="$CCSWITCH_FABLE_PRIORITY"
+    elif [[ -f "$SEQUENCE_FILE" ]]; then
+        v=$(jq -r '.settings.fablePriority // false' "$SEQUENCE_FILE" 2>/dev/null)
+    fi
+    case "$(printf '%s' "$v" | tr '[:upper:]' '[:lower:]')" in
+        1|true|on|yes) _FABLE_PRIORITY_CACHED=1 ;;
+        *)             _FABLE_PRIORITY_CACHED=0 ;;
+    esac
+    [[ "$_FABLE_PRIORITY_CACHED" == "1" ]]
+}
+
 # Container detection
 is_running_in_container() {
     # Check for Docker environment file
@@ -1038,8 +1062,9 @@ pick_from_usage_data() {
         if [[ "$five" == "0" \
               && ( -z "$five_rem" || "$five_rem" == "0" ) \
               && "$seven" != "100" ]]; then
-            if [[ "$fable" =~ ^[0-9]+$ ]] && (( fable < 100 )); then
-                # Fable 여유 있는 cold — 최우선 그룹.
+            if fable_priority_enabled \
+               && [[ "$fable" =~ ^[0-9]+$ ]] && (( fable < 100 )); then
+                # Fable 여유 있는 cold — 최우선 그룹 (Fable 우선 모드일 때만).
                 if [[ -z "$cold_fable_num" ]]; then
                     cold_fable_num="$num"; cold_fable_score="$adjusted"; cold_fable_rem="$seven_rem_norm"
                 elif (( adjusted < cold_fable_score )); then
@@ -1082,7 +1107,8 @@ pick_from_usage_data() {
             # Fable 여유가 남은 계정(0 <= fable < 100)만 따로 모은다.
             # 정렬 키는 Fable 사용률 오름차순(가장 많이 남은 순), 동률이면
             # adjusted, 그 다음 7d reset 임박 순.
-            if [[ "$fable" =~ ^[0-9]+$ ]] && (( fable < 100 )); then
+            if fable_priority_enabled \
+               && [[ "$fable" =~ ^[0-9]+$ ]] && (( fable < 100 )); then
                 if [[ -z "$fable_num" ]]; then
                     fable_num="$num"; fable_score="$fable"; fable_rem="$adjusted"
                 elif (( fable < fable_score )); then
@@ -1586,16 +1612,20 @@ cmd_tick() {
     now_s=$(date +%s)
 
     # 현재 Fable 여유가 남은 계정이 존재하는지 먼저 확인 (캐시만 사용).
+    # Fable 우선 모드가 꺼져 있으면 any_fable_left 를 0 으로 둬서
+    # 아래 skip 분기가 절대 발동하지 않게 한다 = 예전 동작 그대로.
     local any_fable_left=0 cfable
-    for n in $(jq -r '.accounts | keys | map(tonumber) | sort | .[]' "$SEQUENCE_FILE" 2>/dev/null); do
-        ncache="$USAGE_CACHE_DIR/account-$n"
-        [[ -f "$ncache" ]] || continue
-        cfable=$(awk '{print $7}' "$ncache" 2>/dev/null)
-        if [[ "$cfable" =~ ^[0-9]+$ ]] && (( cfable < 100 )); then
-            any_fable_left=1
-            break
-        fi
-    done
+    if fable_priority_enabled; then
+        for n in $(jq -r '.accounts | keys | map(tonumber) | sort | .[]' "$SEQUENCE_FILE" 2>/dev/null); do
+            ncache="$USAGE_CACHE_DIR/account-$n"
+            [[ -f "$ncache" ]] || continue
+            cfable=$(awk '{print $7}' "$ncache" 2>/dev/null)
+            if [[ "$cfable" =~ ^[0-9]+$ ]] && (( cfable < 100 )); then
+                any_fable_left=1
+                break
+            fi
+        done
+    fi
 
     for n in $(jq -r '.accounts | keys | map(tonumber) | sort | .[]' "$SEQUENCE_FILE" 2>/dev/null); do
         [[ "$n" == "$current" ]] && continue
@@ -1720,6 +1750,66 @@ cmd_switch_lowest() {
 # Set a per-account handicap (percentage points added to that account's
 # utilization before the lowest-usage comparison). Higher handicap means
 # the account is picked less often.
+cmd_fable_priority() {
+    local arg="${1:-}"
+    if [[ ! -f "$SEQUENCE_FILE" ]]; then
+        echo "Error: No accounts are managed yet"
+        exit 1
+    fi
+
+    # 인자 없으면 현재 상태만 출력.
+    if [[ -z "$arg" ]]; then
+        local stored
+        stored=$(jq -r '.settings.fablePriority // false' "$SEQUENCE_FILE" 2>/dev/null)
+        if fable_priority_enabled; then
+            echo "Fable priority: ON"
+        else
+            echo "Fable priority: OFF"
+        fi
+        echo "  stored setting : $stored"
+        if [[ -n "${CCSWITCH_FABLE_PRIORITY:-}" ]]; then
+            echo "  env override   : CCSWITCH_FABLE_PRIORITY=$CCSWITCH_FABLE_PRIORITY (takes precedence)"
+        fi
+        echo
+        echo "Usage: $0 --fable-priority <on|off>"
+        echo "  ON  : Fable 잔량이 tier 보다 우선. Fable 이 남은 계정을 먼저 쓰고,"
+        echo "        전부 소진되면 일반 사용량 기준으로 넘어간다."
+        echo "  OFF : (기본) adjusted = max(5h,7d)+handicap 만 보고 고른다."
+        echo "        Fable 사용량은 표에 계속 표시되지만 선택에는 영향을 주지 않는다."
+        return 0
+    fi
+
+    local want
+    case "$(printf '%s' "$arg" | tr '[:upper:]' '[:lower:]')" in
+        on|1|true|yes)  want=true ;;
+        off|0|false|no) want=false ;;
+        *)
+            echo "Error: expected 'on' or 'off', got '$arg'"
+            exit 1
+            ;;
+    esac
+
+    local updated
+    updated=$(jq --argjson v "$want" --arg now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+        .settings = ((.settings // {}) | .fablePriority = $v) |
+        .lastUpdated = $now
+    ' "$SEQUENCE_FILE")
+    if [[ -z "$updated" ]]; then
+        echo "Error: failed to update $SEQUENCE_FILE"
+        exit 1
+    fi
+    printf '%s\n' "$updated" > "$SEQUENCE_FILE"
+
+    if [[ "$want" == "true" ]]; then
+        echo "Fable priority: ON — Fable 여유가 남은 계정을 우선 선택합니다."
+    else
+        echo "Fable priority: OFF — 전체 사용량(adjusted) 기준으로 선택합니다."
+    fi
+    if [[ -n "${CCSWITCH_FABLE_PRIORITY:-}" ]]; then
+        echo "Note: CCSWITCH_FABLE_PRIORITY=$CCSWITCH_FABLE_PRIORITY 가 설정돼 있어 이 세션에서는 env 값이 우선합니다."
+    fi
+}
+
 cmd_set_handicap() {
     if [[ $# -lt 2 ]]; then
         echo "Usage: $0 --set-handicap <account_number> <percent>"
@@ -2285,6 +2375,7 @@ show_usage() {
     echo "  --tick                                     LaunchAgent tick: emergency switch if active account is 100%, else hourly switch at :00"
     echo "  --show-usage                               Print per-account 5h/7d utilization + handicap table"
     echo "  --set-handicap <num> <percent>             Set per-account handicap (0-100); higher = picked less often"
+    echo "  --fable-priority [on|off]                  Prefer accounts with Fable quota left (default: off; no arg = show status)"
     echo "  --sync-current                             Refresh current account's backup from live state"
     echo "  --agent-install                            Install/update the macOS LaunchAgent (recommended on macOS)"
     echo "  --agent-status                             Show LaunchAgent state (launchctl print)"
@@ -2352,6 +2443,10 @@ main() {
         --set-handicap)
             shift
             cmd_set_handicap "$@"
+            ;;
+        --fable-priority)
+            shift
+            cmd_fable_priority "${1:-}"
             ;;
         --sync-current)
             cmd_sync_current

@@ -99,6 +99,7 @@ Next target: Account-3 (cold-warmup — 5h window untouched)
 | `--switch-lowest` | picker 가 추천하는 계정으로 전환 |
 | `--show-usage` | 사용량 표 출력 (switch 안 함, 10초 API 캐시 활용) |
 | `--set-handicap <num> <pct>` | 계정별 handicap 설정 (0–100); 클수록 picker 가 회피 |
+| `--fable-priority [on\|off]` | **Fable 우선 모드** 토글 (기본 off). 인자 없이 실행하면 현재 상태 표시 |
 | `--sync-current` | 현재 계정 백업을 live 키체인/config 로 새로고침 |
 | `--agent-install` | macOS LaunchAgent 설치 (매분 `--tick`) |
 | `--tick` | LaunchAgent 용 1분 tick: ①현재 계정 100% 포화 시 즉시 전환 ②다른 계정의 7d 주간한도가 방금 리셋되면 그 계정으로 즉시 전환 ③매시 `:00` 정기 switch-lowest. 그 외엔 no-op |
@@ -127,7 +128,32 @@ urgency_bonus = max(0, 48 − binding_window_hours_until_reset)   # 48h 램프
 - **Fable** 은 `adjusted` 에 섞지 않는다. Anthropic API 의 `limits[]` 안에 `kind:"weekly_scoped"`, `scope.model.display_name:"Fable"` 로 별도 주간 한도가 오며, picker 는 이를 **tier 우선순위**로만 쓴다. Fable 한도가 없는 계정은 `-1`(미지원)로 저장해 `0%`(여유 만땅)와 구분한다.
 - `blocked-handicap` 판정은 **raw** `max + handicap >= 100` 기준 (urgency 보정 전). 임박 reset 보너스로 차단을 우회하는 것 방지.
 
+### Fable 우선 모드 (선택, 기본 off)
+
+Fable 은 5h/7d 와 **별개의 주간 한도**로 걸립니다. Fable 을 주력으로 쓰면 "전체 사용량은 여유로운데 Fable 만 다 떨어진" 계정이 생기는데, 기본 picker 는 `adjusted` 만 보므로 그런 계정을 계속 고릅니다.
+
+```bash
+ccswitch.sh --fable-priority on     # Fable 잔량을 tier 보다 우선
+ccswitch.sh --fable-priority off    # 기본 — adjusted 만 사용
+ccswitch.sh --fable-priority        # 현재 상태 확인
+```
+
+| 모드 | 동작 |
+|---|---|
+| **off** (기본) | `adjusted = max(5h,7d)+handicap` 만 보고 선택. Fable 사용량은 표·위젯에 계속 표시되지만 **선택에는 영향 없음** |
+| **on** | Fable 잔량이 tier 보다 우선. Fable 여유(0~99%)가 남은 계정을 먼저 쓰고, **전부 소진되면** 일반 사용량 기준으로 넘어감 |
+
+설정은 `sequence.json` 의 `.settings.fablePriority` 에 저장됩니다. 일회성으로 바꾸려면 환경변수가 우선합니다:
+
+```bash
+CCSWITCH_FABLE_PRIORITY=on ccswitch.sh --switch-lowest
+```
+
+on 일 때는 `--tick` 의 7d 리셋 fast-path 도 같은 규칙을 따릅니다 — Fable 여유 계정이 있으면 Fable 소진 계정으로는 점프하지 않습니다.
+
 ### Tier (높은 우선순위부터)
+
+> 아래 **cold(Fable 여유)** / **fable-first** tier 는 Fable 우선 모드가 **on 일 때만** 활성화됩니다. off 면 그 둘은 비어 있고 tier 가 예전 구조(stale > cold > healthy > …)로 동작합니다.
 
 | # | Tier | 진입 조건 |
 |---|---|---|
