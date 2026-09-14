@@ -840,6 +840,15 @@ gather_all_usage() {
                 fi
                 if (( seven_reset > 0 && seven_reset <= now )); then
                     seven=0
+                    # Fable 도 같이 되돌린다. API 에서 Fable 은
+                    # kind=weekly_scoped / group=weekly 이고 resets_at 이
+                    # seven_day 와 동일하다(마이크로초까지). 즉 7d 가 롤오버했으면
+                    # Fable 도 반드시 리셋된 상태다.
+                    # 이 보정이 없으면 캐시에 남은 Fable=100 때문에 "방금 주간
+                    # 한도가 리셋된 계정"이 Fable 소진으로 오인돼 최하위로 밀린다.
+                    if [[ "$fable" =~ ^[0-9]+$ ]]; then
+                        fable=0
+                    fi
                 fi
             fi
             # Remaining-time fields are still needed for the table's
