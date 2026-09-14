@@ -731,6 +731,21 @@ fetch_account_utilization() {
 # 마지막에 써라" 를 표현한다. picker 는 fable + fable_handicap 을
 # 유효값으로 보고, 그게 100 이상이면 Fable 여유 그룹에서 빠진다.
 # 즉 100 을 주면 다른 계정 Fable 이 전부 소진된 뒤에야 쓰인다.
+# 이 계정으로 실제 전환할 수 있는지 = 자격증명과 config 백업이 둘 다 비어 있지 않은지.
+# 키체인 항목이 "존재하지만 비어 있는" 경우(로그인 만료 후 덮어써진 경우 등)도
+# 여기서 걸러진다. perform_switch 가 "Missing backup data" 로 죽는 조건과 동일.
+account_has_backup() {
+    local account_num="$1" email="$2"
+    # config 백업은 수 MB 라 변수로 읽지 않는다. 파일 크기만 본다.
+    # (한 번 슬럽해서 ${var//...} 치환하면 bash 가 CPU 를 통째로 태운다.)
+    local config_file="$BACKUP_DIR/configs/.claude-config-${account_num}-${email}.json"
+    [[ -s "$config_file" ]] || return 1
+    # 자격증명은 작다. 키체인 항목이 "있지만 비어 있는" 경우까지 걸러낸다.
+    local creds
+    creds=$(read_account_credentials "$account_num" "$email")
+    [[ -n "${creds//[[:space:]]/}" ]]
+}
+
 get_account_fable_handicap() {
     local account_num="$1"
     [[ -f "$SEQUENCE_FILE" ]] || { echo 0; return; }
@@ -791,18 +806,24 @@ gather_all_usage() {
         # numbers beat blanks; render marks them with "?" so the operator
         # knows it's an estimate. Reset times are stored as absolute epochs
         # so remaining-time still tracks correctly even from old cache.
-        if util_pair=$(fetch_account_utilization "$num" "$email"); then
+        if ! account_has_backup "$num" "$email"; then
+            # 전환 불가 계정. 캐시 추정치로 채우면 "5h=0/7d=0" 처럼 보여 picker 가
+            # 최우선으로 고른 뒤 perform_switch 에서 죽는다. 아예 후보에서 뺀다.
+            status="nobackup"
+            echo "  [Account-$num $email] no backup credentials — excluded (re-login and run --add-account)" >&2
+        elif util_pair=$(fetch_account_utilization "$num" "$email"); then
             status="ok"
         else
             local fetch_rc=$?
-            if (( fetch_rc == 2 )); then
-                return 2
-            fi
             cache_file="$USAGE_CACHE_DIR/account-$num"
             if [[ -f "$cache_file" ]] && cached=$(cat "$cache_file" 2>/dev/null) && [[ -n "$cached" ]]; then
+                # 429 도 캐시가 있으면 그 계정만 추정치로 대체하고 나머지는 계속 조회한다.
+                # 예전엔 한 계정의 429 가 표 전체를 중단시켰다.
                 util_pair="$cached"
                 status="estimated"
                 echo "  [Account-$num $email] falling back to cached estimate" >&2
+            elif (( fetch_rc == 2 )); then
+                return 2
             else
                 status="unavailable"
             fi
@@ -993,7 +1014,8 @@ render_usage_table() {
                 "$fable_disp" "$handicap" "${adjusted}?" "$ext_disp"
         else
             printf '%-3s %-2s %-32s %5s %7s %5s %7s %8s %9s %9s %4s\n' \
-                "$prefix" "$num" "$email" "-" "-" "-" "-" "-" "$handicap" "N/A" "$ext_disp"
+                "$prefix" "$num" "$email" "-" "-" "-" "-" "-" "$handicap" \
+                "$([[ "$status" == "nobackup" ]] && echo "no-backup" || echo "N/A")" "$ext_disp"
         fi
     done
 }
@@ -1057,6 +1079,9 @@ pick_from_usage_data() {
             [[ "$fable_hc" =~ ^[0-9]+$ ]] || fable_hc=0
             fable_eff=$(( fable + fable_hc ))
             (( fable_eff > 100 )) && fable_eff=100
+        fi
+        if [[ "$status" == "nobackup" ]]; then
+            continue
         fi
         if [[ "$status" == "unavailable" ]]; then
             if [[ -z "$stale_num" ]] || (( num < stale_num )); then
@@ -1548,8 +1573,22 @@ cmd_switch() {
         fi
     done
     
-    next_account="${sequence[$(((current_index + 1) % ${#sequence[@]}))]}"
-    
+    local seq_len=${#sequence[@]} step cand cand_email
+    next_account=""
+    for ((step = 1; step < seq_len; step++)); do
+        cand="${sequence[$(((current_index + step) % seq_len))]}"
+        cand_email=$(jq -r --arg n "$cand" '.accounts[$n].email // ""' "$SEQUENCE_FILE")
+        if account_has_backup "$cand" "$cand_email"; then
+            next_account="$cand"
+            break
+        fi
+        echo "Skipping Account-$cand ($cand_email): no backup credentials — re-login and run --add-account" >&2
+    done
+    if [[ -z "$next_account" ]]; then
+        echo "Error: no other account has backup credentials to switch to"
+        exit 1
+    fi
+
     perform_switch "$next_account"
 }
 
@@ -1693,6 +1732,12 @@ cmd_tick() {
         (( nseven_reset > 0 )) || continue
         since=$(( now_s - nseven_reset ))
         if (( since >= 0 && since < reset_window )); then
+            local nemail
+            nemail=$(jq -r --arg n "$n" '.accounts[$n].email // ""' "$SEQUENCE_FILE")
+            if ! account_has_backup "$n" "$nemail"; then
+                echo "[$(date '+%Y-%m-%d %H:%M:%S')] Account-$n 7d window just reset but has no backup credentials — skipping fast-path."
+                continue
+            fi
             nfable=$(awk '{print $7}' "$ncache" 2>/dev/null)
             local nhc=0
             [[ "$nfable" =~ ^[0-9]+$ ]] && nhc=$(get_account_fable_handicap "$n")
@@ -2095,7 +2140,8 @@ perform_switch() {
     target_config=$(read_account_config "$target_account" "$target_email")
     
     if [[ -z "$target_creds" || -z "$target_config" ]]; then
-        echo "Error: Missing backup data for Account-$target_account"
+        echo "Error: Missing backup data for Account-$target_account ($target_email)"
+        echo "  → Log in to that account in Claude Code, then run: $0 --add-account"
         exit 1
     fi
     
