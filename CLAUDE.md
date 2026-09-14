@@ -42,6 +42,7 @@ wrapper 스크립트(`agent-switch-lowest`, 이름은 레거시)는 `exec ... ${
 - 스크립트 내부 TSV 구분자는 `\x1f` (ASCII US), tab 아님 — tab 은 `read -r` 의 기본 IFS 가 collapse 시켜 빈 필드를 날려버림.
 - `gather_all_usage` 출력 contract: `num<US>email<US>five<US>seven<US>handicap<US>adjusted<US>status<US>five_rem<US>seven_rem<US>has_extra<US>extra_util`. 변경 금지 — `pick_from_usage_data`, `render_usage_table`, `cmd_show_usage` 모두 이걸 파싱.
 - adjusted 공식: `max(5h, 7d) + handicap − urgency_bonus`. `urgency_bonus = max(0, 48 − binding_window_hours)` (handicap == 0 일 때만, 아니면 0). `blocked-handicap` 검사는 urgency 보정 전 raw `max + handicap` 기준.
+- **`ccswitch-statusbar` 도 캐시 롤오버 보정을 똑같이 해야 한다** (`apply_rollover()`). 위젯은 캐시만 읽으므로 보정이 없으면 CLI 와 다른 숫자를 보여준다 — 2026-09 에 위젯이 `7d 59% / Fable 100%` 를 띄웠지만 실제 API 는 `0% / 0%` 였다. 표시 로직(Fable handicap `53+100` 등)도 CLI 와 맞출 것.
 - 캐시 롤오버 보정(`status=="estimated"` + `seven_reset <= now`)은 `seven` 뿐 아니라 **`fable` 도 0 으로 되돌려야 한다**. API 에서 Fable 은 `kind=weekly_scoped`/`group=weekly` 이고 `resets_at` 이 `seven_day` 와 마이크로초까지 동일 — 7d 가 롤오버했으면 Fable 도 리셋된 상태다. 이 보정이 없으면 캐시에 남은 `Fable=100` 때문에 방금 주간한도가 리셋된 계정이 소진으로 오인돼 최하위로 밀린다(2026-09 실제 버그).
 - TSV 는 13컬럼. 13번째 = **fableHandicap** (`sequence.json` 의 `.accounts[N].fableHandicap`). picker 는 `fable_eff = min(100, fable + fableHandicap)` 를 쓰고, 표시는 raw 값 + `53+100` 형태. tick 의 fast-path 는 캐시에 handicap 이 없으므로 `get_account_fable_handicap()` 으로 별도 조회한다.
 - 캐시/`gather_all_usage` 필드가 7개(+TSV 12컬럼)로 늘었다. 7번째 = **Fable %** (`limits[]` 의 `weekly_scoped` + `scope.model.display_name=="Fable"`). 한도 없는 계정은 `-1`.

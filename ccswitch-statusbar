@@ -52,6 +52,30 @@ fi
 
 now=$(date +%s)
 
+# 캐시 롤오버 보정. ccswitch.sh 의 gather_all_usage 와 같은 규칙이어야 한다.
+#
+# 캐시에 적힌 사용률은 "마지막 조회 시점" 값이라, 그 뒤 윈도우가 리셋됐으면
+# 이미 무의미하다(대개 한도에 걸렸을 때의 100% 가 남아 있다). reset epoch 이
+# 과거면 그 윈도우는 0 으로 본다.
+#
+# Fable 은 7d 와 같은 weekly 그룹이고 resets_at 이 동일하므로 7d 와 함께 되돌린다.
+# 이 보정이 없어서 위젯이 CLI 와 다른 숫자를 보여줬다(2026-09: 위젯 59%/100%,
+# 실제 API 0%/0%).
+apply_rollover() {
+    local five="$1" seven="$2" five_r="$3" seven_r="$4" fbl="$5" now="$6"
+    [[ "$five_r" =~ ^[0-9]+$ ]] || five_r=0
+    [[ "$seven_r" =~ ^[0-9]+$ ]] || seven_r=0
+    if (( five_r > 0 && five_r <= now )); then
+        five=0
+    fi
+    if (( seven_r > 0 && seven_r <= now )); then
+        seven=0
+        # 원래 숫자였던 경우에만 0 으로. -1(Fable 미지원)은 그대로 둔다.
+        [[ "$fbl" =~ ^[0-9]+$ ]] && fbl=0
+    fi
+    printf '%s %s %s' "$five" "$seven" "$fbl"
+}
+
 # Format remaining-time seconds as a compact "Nd Nh" / "Nh Nm" / "Nm" string.
 fmt_rem() {
     local rem="${1:-0}"
@@ -80,7 +104,8 @@ sat_emoji() {
 
 # ============ Menu-bar header (always one line) ============
 if [[ -n "$active_num" && -f "$CACHE_DIR/account-$active_num" ]]; then
-    read -r f s _ _ ext_en ext_u fbl < "$CACHE_DIR/account-$active_num"
+    read -r f s f_r s_r ext_en ext_u fbl < "$CACHE_DIR/account-$active_num"
+    read -r f s fbl <<< "$(apply_rollover "${f:-0}" "${s:-0}" "${f_r:-0}" "${s_r:-0}" "${fbl:-}" "$now")"
     emoji=$(sat_emoji "$f" "$s")
     # Format: "🟢 #1  5h:5% 7d:1%  ext:0%"
     # Earlier compact "5/1" looked like a date (May 1). Labeling each
@@ -121,6 +146,7 @@ while read -r num; do
         # come back empty; that's fine.
         read -r five seven five_r seven_r ext_en ext_u fbl < "$cache"
         five_r=${five_r:-0}; seven_r=${seven_r:-0}
+        read -r five seven fbl <<< "$(apply_rollover "${five:-0}" "${seven:-0}" "$five_r" "$seven_r" "${fbl:-}" "$now")"
         five_rem=$(( five_r > now ? five_r - now : 0 ))
         seven_rem=$(( seven_r > now ? seven_r - now : 0 ))
         if [[ "$ext_en" == "true" ]]; then
@@ -132,7 +158,18 @@ while read -r num; do
         else
             ext_disp="—"
         fi
-        if [[ "$fbl" =~ ^[0-9]+$ ]]; then fbl_disp="${fbl}%"; else fbl_disp="—"; fi
+        # Fable handicap 이 걸려 있으면 CLI 와 같이 "53+100" 형태로. 왜 후순위인지
+        # 위젯만 봐도 알 수 있게 한다. handicap 은 캐시에 없어 sequence.json 에서 읽는다.
+        fbl_hc=$(jq -r --arg n "$num" '.accounts[$n].fableHandicap // 0' "$SEQUENCE_FILE" 2>/dev/null)
+        if [[ "$fbl" =~ ^[0-9]+$ ]]; then
+            if [[ "$fbl_hc" =~ ^[0-9]+$ ]] && (( fbl_hc > 0 )); then
+                fbl_disp="${fbl}+${fbl_hc}"
+            else
+                fbl_disp="${fbl}%"
+            fi
+        else
+            fbl_disp="—"
+        fi
         line=$(printf '%s %2s %-32s %3s%%  %-6s  %3s%%  %-6s  %5s  %s' \
             "$prefix" "$num" "${email:0:32}" \
             "${five:-0}" "$(fmt_rem "$five_rem")" \
