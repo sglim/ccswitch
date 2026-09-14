@@ -594,9 +594,13 @@ get_next_account_number() {
 fetch_account_utilization() {
     local account_num="$1"
     local email="$2"
+    # $3: 호출자가 이미 읽어 둔 자격증명(선택). 키체인 조회는 계정당 ~30ms 라
+    # 같은 루프에서 두 번 읽으면 그대로 두 배가 된다. 있으면 재사용한다.
+    local cred="${3-}"
 
-    local cred
-    cred=$(read_account_credentials "$account_num" "$email")
+    if [[ -z "$cred" ]]; then
+        cred=$(read_account_credentials "$account_num" "$email")
+    fi
     if [[ -z "$cred" ]]; then
         echo "  [Account-$account_num $email] no credentials in backup" >&2
         return 1
@@ -806,12 +810,17 @@ gather_all_usage() {
         # numbers beat blanks; render marks them with "?" so the operator
         # knows it's an estimate. Reset times are stored as absolute epochs
         # so remaining-time still tracks correctly even from old cache.
-        if ! account_has_backup "$num" "$email"; then
+        # 자격증명은 이 루프에서 딱 한 번만 읽는다(키체인 조회가 계정당 ~30ms).
+        # 읽은 값을 nobackup 판정과 fetch 양쪽에 재사용한다.
+        local cred_cached config_backup
+        cred_cached=$(read_account_credentials "$num" "$email")
+        config_backup="$BACKUP_DIR/configs/.claude-config-${num}-${email}.json"
+        if [[ ! -s "$config_backup" || -z "${cred_cached//[[:space:]]/}" ]]; then
             # 전환 불가 계정. 캐시 추정치로 채우면 "5h=0/7d=0" 처럼 보여 picker 가
             # 최우선으로 고른 뒤 perform_switch 에서 죽는다. 아예 후보에서 뺀다.
             status="nobackup"
             echo "  [Account-$num $email] no backup credentials — excluded (re-login and run --add-account)" >&2
-        elif util_pair=$(fetch_account_utilization "$num" "$email"); then
+        elif util_pair=$(fetch_account_utilization "$num" "$email" "$cred_cached"); then
             status="ok"
         else
             local fetch_rc=$?
