@@ -55,6 +55,23 @@ readonly USAGE_CACHE_TTL=10
 # every cron tick. Override per-invocation with the env var.
 readonly HYSTERESIS_DELTA="${CCSWITCH_HYSTERESIS_DELTA:-10}"
 
+# cold-warmup tier 에 들어갈 수 있는 7d 사용률 상한.
+# cold 의 목적은 "5h 창을 건드려 클럭을 시작해 두는 것" 인데, 주간 한도가
+# 거의 찬 계정은 어차피 쓸 게 없어 그 투자가 의미 없다. 예전엔 조건이
+# `seven != "100"` 이라는 문자열 비교였고, 7d=99% 인 계정이 cold 로 뽑혀
+# 전환 직후 100% 로 확인되는 일이 있었다(2026-09 실제 사례).
+readonly COLD_MAX_SEVEN="${CCSWITCH_COLD_MAX_SEVEN:-90}"
+
+# cold-warmup 후보인가: 5h 미사용 + 5h 리셋 시각 미상 + 7d 에 실질 여유.
+# picker 와 두 곳의 사유 메시지가 반드시 같은 판정을 써야 표와 실제가 어긋나지 않는다.
+is_cold_candidate() {
+    local five="$1" five_rem="$2" seven="$3"
+    [[ "$five" == "0" ]] || return 1
+    [[ -z "$five_rem" || "$five_rem" == "0" ]] || return 1
+    [[ "$seven" =~ ^[0-9]+$ ]] || return 1
+    (( seven < COLD_MAX_SEVEN ))
+}
+
 # Fable 우선 모드. 기본은 꺼짐 — 켜지 않으면 ccswitch 는 예전처럼
 # adjusted(전체 사용량)만 보고 고른다. Fable 을 주력으로 쓰는 사람만
 # 켜면 되고, 그 외 사용자의 동작은 이 플래그가 꺼져 있는 한 바뀌지 않는다.
@@ -1145,9 +1162,7 @@ pick_from_usage_data() {
         # Tie-break: smaller seven_rem wins (closer 7d reset = the
         # account's headroom is about to refresh anyway, so spend it
         # first rather than burning a slot with weeks of cap left).
-        if [[ "$five" == "0" \
-              && ( -z "$five_rem" || "$five_rem" == "0" ) \
-              && "$seven" != "100" ]]; then
+        if is_cold_candidate "$five" "$five_rem" "$seven"; then
             if fable_priority_enabled \
                && [[ "$fable_eff" =~ ^[0-9]+$ ]] && (( fable_eff < 100 )); then
                 # Fable 여유 있는 cold — 최우선 그룹 (Fable 우선 모드일 때만).
@@ -1860,9 +1875,7 @@ cmd_switch_lowest() {
     target_extra=$(echo "$data" | /usr/bin/awk -F$'\x1f' -v n="$target" '$1==n{print $10}')
     if [[ "$target_status" == "unavailable" ]]; then
         echo "Decision: rotating to stale Account-$target (idle ≥1h, token expired — switching so Claude Code refreshes it)."
-    elif [[ "$target_five" == "0" \
-            && ( -z "$target_five_rem" || "$target_five_rem" == "0" ) \
-            && "$target_seven" != "100" ]]; then
+    elif is_cold_candidate "$target_five" "$target_five_rem" "$target_seven"; then
         echo "Decision: warming up cold Account-$target (5h window untouched — touching now starts the clock for a future reset)."
     elif [[ "$target_five" == "100" || "$target_seven" == "100" ]]; then
         if [[ "$target_extra" == "true" ]]; then
@@ -2092,9 +2105,7 @@ cmd_show_usage() {
         fi
         if [[ "$target_status" == "unavailable" ]]; then
             echo "Next target: Account-$target (stale-token refresh)"
-        elif [[ "$target_five" == "0" \
-                && ( -z "$target_five_rem" || "$target_five_rem" == "0" ) \
-                && "$target_seven" != "100" ]]; then
+        elif is_cold_candidate "$target_five" "$target_five_rem" "$target_seven"; then
             echo "Next target: Account-$target (cold-warmup — 5h window untouched${fable_note})"
         elif [[ "$target_five" == "100" || "$target_seven" == "100" ]]; then
             if [[ "$target_extra" == "true" ]]; then

@@ -174,7 +174,7 @@ on 일 때는 `--tick` 의 7d 리셋 fast-path 도 같은 규칙을 따릅니다
 | # | Tier | 진입 조건 |
 |---|---|---|
 | 1 | **stale** | `status=="unavailable"` — 토큰 만료, switch 로 refresh 유도 |
-| 2 | **cold (Fable 여유)** | `5h=0` + `5h_reset` 없음 + `7d != 100` **이면서 Fable 잔량 있음**(0~99%) — 5h 클럭 시작 목적 |
+| 2 | **cold (Fable 여유)** | `5h=0` + `5h_reset` 없음 + **`7d < 90`**(`CCSWITCH_COLD_MAX_SEVEN`) **이면서 Fable 잔량 있음**(0~99%) — 5h 클럭 시작 목적 |
 | 3 | **fable-first** | healthy 계정 중 **Fable 주간 한도에 여유가 남은**(0~99%) 계정. Fable 사용률이 낮은(=많이 남은) 순. Fable 은 별도 주간 한도라 남아 있으면 먼저 쓰는 게 이득 |
 | 4 | **cold (Fable 소진)** | cold 조건은 맞지만 Fable 이 100%(또는 미지원)인 계정. Fable 잔량이 tier 보다 우선하므로 여기로 밀린다 |
 | 5 | **healthy** | 두 윈도우 모두 100% 미만. handicap 유무 무관 — handicap 은 `adjusted` 점수에만 반영되고 tier 를 나누지 않음. 따라서 handicap 계정이라도 adjusted 가 최저면 이 tier 에서 선택됨 |
