@@ -62,6 +62,22 @@ readonly HYSTERESIS_DELTA="${CCSWITCH_HYSTERESIS_DELTA:-10}"
 # 전환 직후 100% 로 확인되는 일이 있었다(2026-09 실제 사례).
 readonly COLD_MAX_SEVEN="${CCSWITCH_COLD_MAX_SEVEN:-90}"
 
+# --why / CCSWITCH_WHY=1 일 때 picker 의 분류 근거를 stderr 로 남긴다.
+# LLM 을 쓰지 않는다 — 이미 계산해 놓고 버리던 값을 그대로 찍는 것뿐이라
+# 결정 결과에 영향이 없고 비용·지연도 0 이다.
+# stdout 은 pick_from_usage_data 의 계약(계정 번호 한 줄)이라 건드리지 않는다.
+why() {
+    [[ "${CCSWITCH_WHY:-0}" == "1" ]] || return 0
+    printf '  %s\n' "$*" >&2
+}
+
+# 계정 번호를 폭 맞춰 찍는 why. 첫 인자가 번호, 나머지가 본문.
+why_acct() {
+    [[ "${CCSWITCH_WHY:-0}" == "1" ]] || return 0
+    local n="$1"; shift
+    printf '  %-3s %s\n' "$n" "$*" >&2
+}
+
 # cold-warmup 후보인가: 5h 미사용 + 5h 리셋 시각 미상 + 7d 에 실질 여유.
 # picker 와 두 곳의 사유 메시지가 반드시 같은 판정을 써야 표와 실제가 어긋나지 않는다.
 is_cold_candidate() {
@@ -1311,11 +1327,16 @@ pick_from_usage_data() {
             [[ "$fable_hc" =~ ^[0-9]+$ ]] || fable_hc=0
             fable_eff=$(( fable + fable_hc ))
             (( fable_eff > 100 )) && fable_eff=100
+            if (( fable_hc > 0 )); then
+                why_acct "$num" "Fable 유효 ${fable_eff} = 실제 ${fable}% + handicap ${fable_hc}"
+            fi
         fi
         if [[ "$status" == "nobackup" ]]; then
+            why_acct "$num" "제외: 백업 자격증명 없음 (전환 불가)"
             continue
         fi
         if [[ "$status" == "unavailable" ]]; then
+            why_acct "$num" "stale 후보: 사용량 조회 실패 (토큰 갱신 목적)"
             if [[ -z "$stale_num" ]] || (( num < stale_num )); then
                 stale_num="$num"
             fi
@@ -1356,6 +1377,7 @@ pick_from_usage_data() {
         fi
         local raw_with_handicap=$(( raw_max_p + handicap ))
         if (( has_handicap )) && (( raw_with_handicap >= 100 )); then
+            why_acct "$num" "blocked-handicap: raw ${raw_max_p}% + handicap ${handicap} = ${raw_with_handicap} >= 100 (최후 수단)"
             if [[ -z "$blocked_num" ]] || (( raw_with_handicap < blocked_score )); then
                 blocked_num="$num"
                 blocked_score="$raw_with_handicap"
@@ -1368,10 +1390,16 @@ pick_from_usage_data() {
         # Tie-break: smaller seven_rem wins (closer 7d reset = the
         # account's headroom is about to refresh anyway, so spend it
         # first rather than burning a slot with weeks of cap left).
+        if ! is_cold_candidate "$five" "$five_rem" "$seven"; then
+            if [[ "$five" == "0" && ( -z "$five_rem" || "$five_rem" == "0" ) ]]; then
+                why_acct "$num" "cold 제외: 7d ${seven}% >= COLD_MAX_SEVEN(${COLD_MAX_SEVEN})"
+            fi
+        fi
         if is_cold_candidate "$five" "$five_rem" "$seven"; then
             if fable_priority_enabled \
                && [[ "$fable_eff" =~ ^[0-9]+$ ]] && (( fable_eff < 100 )); then
                 # Fable 여유 있는 cold — 최우선 그룹 (Fable 우선 모드일 때만).
+                why_acct "$num" "cold(Fable 여유) 후보: 5h 미사용, 7d ${seven}%, Fable 유효 ${fable_eff}, adjusted ${adjusted}"
                 if [[ -z "$cold_fable_num" ]]; then
                     cold_fable_num="$num"; cold_fable_score="$adjusted"; cold_fable_rem="$seven_rem_norm"
                 elif (( adjusted < cold_fable_score )); then
@@ -1381,6 +1409,7 @@ pick_from_usage_data() {
                 fi
             else
                 # Fable 소진(100%) 또는 미지원(-1) — 후순위 그룹.
+                why_acct "$num" "cold 후보: 5h 미사용, 7d ${seven}%, Fable 유효 ${fable_eff}, adjusted ${adjusted}"
                 if [[ -z "$cold_num" ]]; then
                     cold_num="$num"; cold_score="$adjusted"; cold_rem="$seven_rem_norm"
                 elif (( adjusted < cold_score )); then
@@ -1404,6 +1433,7 @@ pick_from_usage_data() {
             # non-handicap account sitting at, say, 94%. The
             # blocked-handicap guard above still fully excludes a
             # handicapped account whose raw+handicap >= 100.
+            why_acct "$num" "healthy 후보: 5h ${five}%, 7d ${seven}%, adjusted ${adjusted}"
             if [[ -z "$healthy_num" ]]; then
                 healthy_num="$num"; healthy_score="$adjusted"; healthy_rem="$seven_rem_norm"
             elif (( adjusted < healthy_score )); then
@@ -1416,6 +1446,7 @@ pick_from_usage_data() {
             # adjusted, 그 다음 7d reset 임박 순.
             if fable_priority_enabled \
                && [[ "$fable_eff" =~ ^[0-9]+$ ]] && (( fable_eff < 100 )); then
+                why_acct "$num" "fable-first 후보: Fable 유효 ${fable_eff} (< 100), adjusted ${adjusted}"
                 if [[ -z "$fable_num" ]]; then
                     fable_num="$num"; fable_score="$fable_eff"; fable_rem="$adjusted"
                 elif (( fable_eff < fable_score )); then
@@ -1425,6 +1456,7 @@ pick_from_usage_data() {
                 fi
             fi
         elif [[ "$has_extra" == "true" ]]; then
+            why_acct "$num" "maxed-with-extra: 5h ${five}% / 7d ${seven}% 포화, extra-usage 있음"
             # maxed-with-extra. Treat all candidates as equal-priority
             # (every pick costs paid overage), but prefer "not current" so
             # consecutive runs alternate between them. Tie-break inside
@@ -1450,6 +1482,7 @@ pick_from_usage_data() {
                 fi
             fi
         else
+            why_acct "$num" "maxed-no-extra: 포화 + extra-usage 없음 (최후 수단)"
             if [[ -z "$maxed_noextra_num" ]]; then
                 maxed_noextra_num="$num"; maxed_noextra_score="$adjusted"; maxed_noextra_rem="$seven_rem_norm"
             elif (( adjusted < maxed_noextra_score )); then
@@ -1460,24 +1493,32 @@ pick_from_usage_data() {
         fi
     done
     if [[ -n "$stale_num" ]]; then
+        why "→ 선택: Account-$stale_num (tier=stale — 토큰 갱신 우선)"
         echo "$stale_num"
     elif [[ -n "$cold_fable_num" ]]; then
+        why "→ 선택: Account-$cold_fable_num (tier=cold-fable — Fable 여유 + 5h 미사용)"
         # ── Fable 여유가 있는 그룹 (cold → healthy) ──────────────────
         # Fable 잔량이 tier 보다 우선한다. 예전엔 cold 가 fable 보다 위라
         # Fable 100% 계정이 "5h 가 0" 이라는 이유만으로 계속 뽑혔다.
         echo "$cold_fable_num"
     elif [[ -n "$fable_num" ]]; then
+        why "→ 선택: Account-$fable_num (tier=fable-first — Fable 유효 ${fable_score})"
         echo "$fable_num"
     elif [[ -n "$cold_num" ]]; then
+        why "→ 선택: Account-$cold_num (tier=cold — 5h 클럭 시작)"
         # ── 여기부터 Fable 소진/미지원 그룹 ───────────────────────────
         echo "$cold_num"
     elif [[ -n "$healthy_num" ]]; then
+        why "→ 선택: Account-$healthy_num (tier=healthy — adjusted ${healthy_score} 최저)"
         echo "$healthy_num"
     elif [[ -n "$maxed_extra_alt_num" ]]; then
+        why "→ 선택: Account-$maxed_extra_alt_num (tier=maxed-extra-alt — 포화지만 extra-usage)"
         echo "$maxed_extra_alt_num"
     elif [[ -n "$maxed_extra_num" ]]; then
+        why "→ 선택: Account-$maxed_extra_num (tier=maxed-extra)"
         echo "$maxed_extra_num"
     elif [[ -n "$maxed_noextra_num" ]]; then
+        why "→ 선택: Account-$maxed_noextra_num (tier=maxed-no-extra — 최후 수단)"
         echo "$maxed_noextra_num"
     else
         echo "$blocked_num"
@@ -3092,6 +3133,7 @@ show_usage() {
     echo "  --tick                                     LaunchAgent tick: emergency switch if active account is 100%, else hourly switch at :00"
     echo "  --show-usage                               Print per-account 5h/7d utilization + handicap table"
     echo "  --set-handicap <num> <percent>             Set per-account handicap (0-100); higher = picked less often"
+    echo "  --why <command>                            Print picker reasoning to stderr (no API/LLM; e.g. --why --show-usage)"
     echo "  --fable-priority [on|off]                  Prefer accounts with Fable quota left (default: off; no arg = show status)"
     echo "  --set-fable-handicap <num> <percent>       Per-account Fable handicap (0-100); 100 = use that account's Fable last"
     echo "  --sync-current                             Refresh current account's backup from live state"
@@ -3131,8 +3173,16 @@ main() {
     check_bash_version
     check_dependencies
 
-    # 모든 명령 앞에 `--pool <이름>` 을 붙일 수 있다.
-    if [[ "${1:-}" == "--pool" ]]; then
+    # 모든 명령 앞에 `--pool <이름>` 과 `--why` 를 붙일 수 있다(순서 무관).
+    #   --pool <이름> : 해당 풀로 동작
+    #   --why         : picker 판단 근거를 stderr 로 출력 (LLM·API 없음)
+    while [[ "${1:-}" == "--pool" || "${1:-}" == "--why" ]]; do
+        if [[ "$1" == "--why" ]]; then
+            CCSWITCH_WHY=1
+            export CCSWITCH_WHY
+            shift
+            continue
+        fi
         [[ -n "${2:-}" ]] || { echo "Usage: $0 --pool <name> <command>"; exit 1; }
         POOL="$2"
         shift 2
@@ -3140,7 +3190,7 @@ main() {
             echo "Error: 풀 '$POOL' 이 없다 (--pool-list)"
             exit 1
         fi
-    fi
+    done
 
     case "${1:-}" in
         --add-account)

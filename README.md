@@ -99,6 +99,7 @@ Next target: Account-3 (cold-warmup — 5h window untouched)
 | `--switch-lowest` | picker 가 추천하는 계정으로 전환 |
 | `--show-usage` | 사용량 표 출력 (switch 안 함, 10초 API 캐시 활용) |
 | `--set-handicap <num> <pct>` | 계정별 handicap 설정 (0–100); 클수록 picker 가 회피 |
+| `--why <명령>` | picker 판단 근거를 stderr 로 출력 (예: `--why --show-usage`). **LLM·API 호출 없음** — 이미 계산된 값을 찍기만 하므로 결과가 달라지지 않고 비용·지연도 0 |
 | `--fable-priority [on\|off]` | **Fable 우선 모드** 토글 (기본 off). 인자 없이 실행하면 현재 상태 표시 |
 | `--set-fable-handicap <num> <pct>` | 계정별 **Fable handicap** (0–100). 100 = 그 계정 Fable 을 가장 마지막에 사용 |
 | `--sync-current` | 현재 계정 백업을 live 키체인/config 로 새로고침 |
