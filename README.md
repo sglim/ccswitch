@@ -267,6 +267,8 @@ rm -rf ~/.claude-switch-backup
 
 **"accessToken expired; skipping"** — 해당 계정의 OAuth 토큰 만료. ccswitch 는 토큰 refresh 를 직접 수행하지 않습니다. 그 계정으로 한 번 switch 하면 Claude Code 가 다음 호출 시 refresh 합니다. picker 의 `stale` tier 가 정확히 이런 만료 계정을 우선 선택하도록 설계됨.
 
+**`/status` 는 새 계정인데 quota 는 옛 계정에서 줄어듦 / 두 칸의 사용량이 똑같음** — macOS 에는 자격증명 저장소가 둘 있다(키체인, 그리고 키체인이 잠긴 ssh 세션이 쓰는 `~/.claude/.credentials.json`). 둘이 서로 다른 계정이 될 수 있어서, ccswitch 는 두 저장소의 토큰 주인을 프로필 API 로 확인해 **주인의 칸에만** 백업한다. 예전 버전은 `.claude.json` 이 말하는 계정 칸에 키체인 값을 무조건 써서 남의 토큰이 들어갔다. 이미 섞인 칸은 그 계정으로 다시 로그인한 뒤 `--sync-current`.
+
 **LaunchAgent 가 발동 안 함** — `~/.claude-switch-backup/cron.log` 에서 에러 확인. `ccswitch.sh --agent-status` 로 `launchctl print` 결과 확인, `--agent-kick` 로 수동 트리거.
 
 **`Adjusted` 가 `2` 같이 작게 나옴** — `urgency_bonus` 효과. reset 임박한 계정은 큰 보너스가 차감됨. `handicap > 0` 이면 보너스 자동 억제.

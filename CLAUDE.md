@@ -57,6 +57,9 @@ wrapper 스크립트(`agent-switch-lowest`, 이름은 레거시)는 `exec ... ${
 - Hysteresis 는 **현재 계정이 포화(5h/7d ≥ 100)면 우회**. `cmd_switch_lowest` 와 `cmd_show_usage` 양쪽에 같은 검사가 있어야 표의 "Next target" 과 실제 동작이 일치한다.
 - Hysteresis (`HYSTERESIS_DELTA`, 기본 10%p) 는 current+target 둘 다 `status=="ok"` 일 때만 switch 차단. `stale`/`cold`/`estimated`/`blocked-handicap` 은 우회.
 
+- **자격증명 저장소는 둘이다**(키체인 `Claude Code-credentials` / 키체인이 잠긴 ssh 세션용 `~/.claude/.credentials.json`). 서로 다른 계정일 수 있다. 백업은 `backup_live_credentials` 로 **토큰 주인(프로필 API `/api/oauth/profile`)의 칸에만** 쓴다. `.claude.json` 의 `oauthAccount` 를 믿고 쓰면 남의 토큰이 들어간다(2026-09: 1·2번 칸이 같은 토큰 → 폐기). 주인 확인 실패·더 오래된 토큰이면 쓰지 않는다.
+- live 에 쓸 때(`write_credentials`)는 Claude Code 와 같은 규칙: 키체인이 되면 키체인만, 잠겼으면 파일. 같은 토큰을 두 저장소에 넣지 말 것 — 한쪽이 갱신(회전)하면 다른 쪽이 무효가 된다.
+
 ## 테스트
 
 - `bash -n ccswitch.sh` — syntax 체크

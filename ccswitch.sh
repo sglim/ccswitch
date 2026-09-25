@@ -447,23 +447,79 @@ get_current_account() {
     echo "${email:-none}"
 }
 
-# Read credentials based on platform
-read_credentials() {
-    local platform
-    platform=$(detect_platform)
-    
-    case "$platform" in
-        macos)
-            security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null || echo ""
-            ;;
-        linux|wsl)
-            if [[ -f "$HOME/.claude/.credentials.json" ]]; then
-                cat "$HOME/.claude/.credentials.json"
-            else
-                echo ""
-            fi
-            ;;
+# 살아 있는 자격증명 저장소. macOS 에는 둘이 있다:
+#   keychain — 키체인을 열 수 있는 세션(GUI·잠금 푼 터미널)의 Claude Code 가 쓴다
+#   file     — 키체인이 잠긴 세션(ssh)의 Claude Code 가 쓰는 ~/.claude/.credentials.json
+# 둘은 서로 다른 계정일 수 있다(실측: 키체인=3번, 파일=1번). 그래서 .claude.json 이
+# 말하는 계정을 믿지 않고, 토큰의 실제 주인을 프로필 API 로 확인해 다룬다.
+live_credential_sources() {
+    [[ "$(detect_platform)" == "macos" ]] && echo keychain
+    echo file
+}
+
+read_live_store() {
+    case "$1" in
+        keychain) security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null || true ;;
+        file)     [[ -f "$HOME/.claude/.credentials.json" ]] && cat "$HOME/.claude/.credentials.json" || true ;;
     esac
+}
+
+creds_expires_at() {
+    local e
+    e=$(jq -r '.claudeAiOauth.expiresAt // 0' <<<"$1" 2>/dev/null || echo 0)
+    [[ "$e" =~ ^[0-9]+$ ]] && echo "$e" || echo 0
+}
+
+# 토큰의 실제 주인 → "accountUuid<TAB>organizationUuid". 만료·폐기·네트워크 실패면 빈 값.
+creds_owner() {
+    local token
+    token=$(jq -r '.claudeAiOauth.accessToken // empty' <<<"$1" 2>/dev/null || true)
+    [[ -n "$token" ]] || return 0
+    curl -s -m 10 "https://api.anthropic.com/api/oauth/profile" \
+        -H "Authorization: Bearer $token" -H "anthropic-beta: oauth-2025-04-20" 2>/dev/null \
+        | jq -r 'select(.account.uuid and .organization.uuid) | [.account.uuid, .organization.uuid] | @tsv' 2>/dev/null || true
+}
+
+# 살아 있는 저장소 중 주인이 (accountUuid, organizationUuid) 인 것. 없으면 빈 값.
+read_live_credentials_of() {
+    local uuid="$1" org="$2" src creds
+    for src in $(live_credential_sources); do
+        creds=$(read_live_store "$src")
+        [[ -n "${creds//[[:space:]]/}" ]] || continue
+        if [[ "$(creds_owner "$creds")" == "$uuid"$'\t'"$org" ]]; then
+            echo "$creds"
+            return
+        fi
+    done
+}
+
+# 살아 있는 저장소를 각각 «토큰 주인»의 칸에 백업한다.
+# 예전엔 .claude.json 이 말하는 계정 칸에 키체인 값을 무조건 썼다. 두 저장소가 어긋나면
+# 남의 토큰이 들어가, 1·2번 칸이 같은 토큰(나중에 폐기됨)을 갖게 됐다(2026-09-26 실측).
+# 주인을 확인 못 하거나(만료·폐기) 백업보다 오래된 토큰이면 쓰지 않는다.
+backup_live_credentials() {
+    local src creds uuid org slot email old
+    for src in $(live_credential_sources); do
+        creds=$(read_live_store "$src")
+        [[ -n "${creds//[[:space:]]/}" ]] || continue
+        IFS=$'\t' read -r uuid org < <(creds_owner "$creds"; echo) || true
+        slot=""
+        if [[ -n "$uuid" ]]; then
+            slot=$(jq -r --arg u "$uuid" --arg o "$org" \
+                '.accounts | to_entries[] | select(.value.uuid == $u and (.value.organizationUuid // "") == $o) | .key' \
+                "$SEQUENCE_FILE" 2>/dev/null | head -n1)
+        fi
+        if [[ -z "$slot" ]]; then
+            echo "  [$src] 토큰 주인을 확인 못 함(만료·폐기·미등록) — 백업하지 않음" >&2
+            continue
+        fi
+        email=$(jq -r --arg n "$slot" '.accounts[$n].email' "$SEQUENCE_FILE")
+        old=$(read_account_credentials "$slot" "$email")
+        if (( $(creds_expires_at "$creds") < $(creds_expires_at "$old") )); then
+            continue
+        fi
+        write_account_credentials "$slot" "$email" "$creds"
+    done
 }
 
 # Write credentials based on platform
@@ -471,10 +527,17 @@ write_credentials() {
     local credentials="$1"
     local platform
     platform=$(detect_platform)
-    
+
     case "$platform" in
         macos)
-            security add-generic-password -U -s "Claude Code-credentials" -a "$USER" -w "$credentials" 2>/dev/null
+            # Claude Code 와 같은 규칙: 키체인을 쓸 수 있으면 키체인, 잠겨 있으면(ssh) 파일.
+            # 같은 토큰을 두 저장소에 다 넣으면 한쪽이 갱신(회전)될 때 다른 쪽이 무효가 된다.
+            if ! security add-generic-password -U -s "Claude Code-credentials" -a "$USER" -w "$credentials" 2>/dev/null; then
+                echo "  키체인이 잠겨 있어 ~/.claude/.credentials.json 에 씀" >&2
+                mkdir -p "$HOME/.claude"
+                printf '%s' "$credentials" > "$HOME/.claude/.credentials.json"
+                chmod 600 "$HOME/.claude/.credentials.json"
+            fi
             ;;
         linux|wsl)
             mkdir -p "$HOME/.claude"
@@ -483,6 +546,7 @@ write_credentials() {
             ;;
     esac
 }
+
 
 # Read account credentials from backup.
 # macOS: keychain is authoritative. When it returns usable creds we also
@@ -1319,11 +1383,12 @@ cmd_add_account() {
     account_num=$(get_next_account_number)
 
     local current_creds current_config
-    current_creds=$(read_credentials)
+    current_creds=$(read_live_credentials_of "$current_account_uuid" "$current_org_uuid")
     current_config=$(cat "$(get_claude_config_path)")
 
     if [[ -z "$current_creds" ]]; then
-        echo "Error: No credentials found for current account"
+        echo "Error: $current_email 의 유효한 자격증명을 키체인·~/.claude/.credentials.json 어디서도 찾지 못함"
+        echo "  → Claude Code 에서 그 계정으로 /login 한 뒤 다시 실행"
         exit 1
     fi
 
@@ -2147,11 +2212,11 @@ perform_switch() {
     fi
 
     # Step 1: Backup current account
-    local current_creds current_config
-    current_creds=$(read_credentials)
+    # 자격증명은 토큰 주인의 칸에, 설정은 .claude.json 이 말하는 계정 칸에.
+    local current_config
     current_config=$(cat "$(get_claude_config_path)")
 
-    write_account_credentials "$current_account" "$current_email" "$current_creds"
+    backup_live_credentials
     write_account_config "$current_account" "$current_email" "$current_config"
     
     # Step 2: Retrieve target account
@@ -2244,21 +2309,10 @@ cmd_sync_current() {
         exit 1
     fi
 
-    local current_creds current_config
-    current_creds=$(read_credentials)
+    local current_config
     current_config=$(cat "$(get_claude_config_path)")
 
-    if [[ -z "$current_creds" ]]; then
-        echo "Error: No live credentials found to sync"
-        exit 1
-    fi
-
-    if ! echo "$current_creds" | jq . >/dev/null 2>&1; then
-        echo "Error: Live credentials are not valid JSON; refusing to overwrite backup"
-        exit 1
-    fi
-
-    write_account_credentials "$current_account" "$current_email" "$current_creds"
+    backup_live_credentials
     write_account_config "$current_account" "$current_email" "$current_config"
 
     local label
