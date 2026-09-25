@@ -109,6 +109,9 @@ Next target: Account-3 (cold-warmup — 5h window untouched)
 | `--agent-remove` | LaunchAgent 제거 (`~/.claude-switch-backup` 보존) |
 | `--cron-install` | 레거시: cron 항목 설치 (macOS 에선 키체인 접근 불가 — agent 권장) |
 | `--cron-status` / `--cron-log [N]` / `--cron-remove` | 레거시 cron 제어 |
+| `--dirs-init <num>` | **dirs 모드** 켜기: `<num>` 을 A(기본 `~/.claude`)로, 나머지 계정은 `~/.claude-b`, `-c`… 폴더(`CLAUDE_CONFIG_DIR`)로. 폴더마다 토큰 주인을 확인해 ✓/✗ 표시 |
+| `run <num\|auto> [claude 인자]` | dirs 모드: 그 계정 폴더로 `claude` 실행. `auto` = A 를 뺀 계정 중 picker 가 고른 쪽 (예: `run auto -p "…"`) |
+| `--pick [nums]` | dirs 모드: picker 가 고른 계정 번호만 출력 |
 | `--help` | 도움말 |
 
 `--switch-to` 는 계정 번호, 이메일, 또는 같은 이메일이 여러 org 에 속할 경우 `"email (org)"` 형식으로 지정 가능.

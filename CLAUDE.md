@@ -18,6 +18,8 @@ LaunchAgent 는 `StartInterval 60` 으로 매분 `--tick` 을 실행. `cmd_tick`
 3. **정기**: `date +%M` 이 `00` 이면 (매시 정각) 일반 `cmd_switch_lowest` (전 계정 sweep).
 4. 그 외 분: 무출력 no-op — cron.log 를 조용히 유지하고 분당 API 호출을 active 1개로 제한 (429 회피).
 
+**dirs 모드**(`.settings.mode == "dirs"`)에서는 tick 이 곧바로 끝난다(전역 전환 없음, `perform_switch` 도 거부). 계정 선택은 `run auto`/`--pick` 이 호출 시점에 사용량을 직접 조회한다. 위젯 캐시도 그때만 갱신된다.
+
 wrapper 스크립트(`agent-switch-lowest`, 이름은 레거시)는 `exec ... ${CRON_COMMAND}` 로 `--tick` 을 호출. `CRON_COMMAND` 상수만 바꾸면 wrapper·plist 가 `--agent-install` 재실행 시 함께 갱신됨.
 
 ## 이 폴더에서 쓸 수 있는 slash 명령
@@ -59,6 +61,7 @@ wrapper 스크립트(`agent-switch-lowest`, 이름은 레거시)는 `exec ... ${
 
 - **자격증명 저장소는 둘이다**(키체인 `Claude Code-credentials` / 키체인이 잠긴 ssh 세션용 `~/.claude/.credentials.json`). 서로 다른 계정일 수 있다. 백업은 `backup_live_credentials` 로 **토큰 주인(프로필 API `/api/oauth/profile`)의 칸에만** 쓴다. `.claude.json` 의 `oauthAccount` 를 믿고 쓰면 남의 토큰이 들어간다(2026-09: 1·2번 칸이 같은 토큰 → 폐기). 주인 확인 실패·더 오래된 토큰이면 쓰지 않는다.
 - live 에 쓸 때(`write_credentials`)는 Claude Code 와 같은 규칙: 키체인이 되면 키체인만, 잠겼으면 파일. 같은 토큰을 두 저장소에 넣지 말 것 — 한쪽이 갱신(회전)하면 다른 쪽이 무효가 된다.
+- dirs 모드 키체인 이름: 기본 폴더는 `Claude Code-credentials`, 그 밖은 `Claude Code-credentials-<sha256(폴더 절대경로) 앞 8자>`. 기본 폴더 계정은 `CLAUDE_CONFIG_DIR` 를 **비운 채** 띄운다(명시하면 접미사 이름을 찾는다). 폴더에 토큰을 복사해 넣지 말고 폴더마다 `/login` 한다(떠 있는 세션이 같은 토큰을 갱신하면 무효).
 
 ## 테스트
 
