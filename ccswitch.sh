@@ -138,6 +138,11 @@ detect_platform() {
 
 # Get Claude configuration file path with fallback
 get_claude_config_path() {
+    # default 가 아닌 풀은 그 폴더의 .claude.json (CLAUDE_CONFIG_DIR 규칙).
+    if [[ "${POOL:-default}" != "default" ]]; then
+        echo "$(pool_dir)/.claude.json"
+        return
+    fi
     local primary_config="$HOME/.claude/.claude.json"
     local fallback_config="$HOME/.claude.json"
     
@@ -449,7 +454,7 @@ get_current_account() {
 
 # 살아 있는 자격증명 저장소. macOS 에는 둘이 있다:
 #   keychain — 키체인을 열 수 있는 세션(GUI·잠금 푼 터미널)의 Claude Code 가 쓴다
-#   file     — 키체인이 잠긴 세션(ssh)의 Claude Code 가 쓰는 ~/.claude/.credentials.json
+#   file     — 키체인이 잠긴 세션(ssh)의 Claude Code 가 쓰는 <풀 폴더>/.credentials.json
 # 둘은 서로 다른 계정일 수 있다(실측: 키체인=3번, 파일=1번). 그래서 .claude.json 이
 # 말하는 계정을 믿지 않고, 토큰의 실제 주인을 프로필 API 로 확인해 다룬다.
 live_credential_sources() {
@@ -459,8 +464,8 @@ live_credential_sources() {
 
 read_live_store() {
     case "$1" in
-        keychain) security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null || true ;;
-        file)     [[ -f "$HOME/.claude/.credentials.json" ]] && cat "$HOME/.claude/.credentials.json" || true ;;
+        keychain) security find-generic-password -s "$(dir_keychain_service "$(pool_dir)")" -w 2>/dev/null || true ;;
+        file)     [[ -f "$(pool_dir)/.credentials.json" ]] && cat "$(pool_dir)/.credentials.json" || true ;;
     esac
 }
 
@@ -514,7 +519,7 @@ backup_live_credentials() {
             continue
         fi
         email=$(jq -r --arg n "$slot" '.accounts[$n].email' "$SEQUENCE_FILE")
-        old=$(read_account_credentials_global "$slot" "$email")
+        old=$(read_account_credentials "$slot" "$email")
         if (( $(creds_expires_at "$creds") < $(creds_expires_at "$old") )); then
             continue
         fi
@@ -532,43 +537,58 @@ write_credentials() {
         macos)
             # Claude Code 와 같은 규칙: 키체인을 쓸 수 있으면 키체인, 잠겨 있으면(ssh) 파일.
             # 같은 토큰을 두 저장소에 다 넣으면 한쪽이 갱신(회전)될 때 다른 쪽이 무효가 된다.
-            if ! security add-generic-password -U -s "Claude Code-credentials" -a "$USER" -w "$credentials" 2>/dev/null; then
-                echo "  키체인이 잠겨 있어 ~/.claude/.credentials.json 에 씀" >&2
-                mkdir -p "$HOME/.claude"
-                printf '%s' "$credentials" > "$HOME/.claude/.credentials.json"
-                chmod 600 "$HOME/.claude/.credentials.json"
+            local dir
+            dir=$(pool_dir)
+            if ! security add-generic-password -U -s "$(dir_keychain_service "$dir")" -a "$USER" -w "$credentials" 2>/dev/null; then
+                echo "  키체인이 잠겨 있어 $dir/.credentials.json 에 씀" >&2
+                mkdir -p "$dir"
+                printf '%s' "$credentials" > "$dir/.credentials.json"
+                chmod 600 "$dir/.credentials.json"
             fi
             ;;
         linux|wsl)
-            mkdir -p "$HOME/.claude"
-            printf '%s' "$credentials" > "$HOME/.claude/.credentials.json"
-            chmod 600 "$HOME/.claude/.credentials.json"
+            mkdir -p "$(pool_dir)"
+            printf '%s' "$credentials" > "$(pool_dir)/.credentials.json"
+            chmod 600 "$(pool_dir)/.credentials.json"
             ;;
     esac
 }
 
-# ── dirs 모드 ────────────────────────────────────────────────────────────────
-# settings.mode == "dirs" 이면 계정마다 CLAUDE_CONFIG_DIR 을 따로 둔다.
-# 전역 전환(키체인·.claude.json 을 갈아 끼우는 perform_switch)은 하지 않고,
-# 새 세션을 띄울 때 `run` 이 계정 폴더를 골라 준다. 이미 도는 세션의 계정은
-# 바뀌지 않는다. 자격증명을 복사하지 않고 계정마다 공식 로그인을 유지한다.
+# ── 풀(pool) ────────────────────────────────────────────────────────────────
+# 풀 = Claude 설정 폴더 하나 + 그 폴더가 돌려 쓰는 계정 목록. 풀 안에서는 예전처럼
+# 토큰을 갈아 끼워, 그 폴더로 떠 있는 세션 전부가 함께 바뀐다.
+#   sequence.json 의 .pools 가 없으면 → 모든 계정이 든 "default" 풀(~/.claude) 하나.
+#   .pools[이름] = {dir, accounts:[번호…]} 로 풀을 더한다(--pool-add).
+# 명령은 `--pool <이름>`(또는 CCSWITCH_POOL) 이 가리키는 풀에 적용된다. 기본 "default".
+# 한 계정은 동시에 한 풀에서만 쓴다 — 같은 토큰을 두 폴더가 번갈아 갱신하면 한쪽이
+# 무효가 되므로, 다른 풀이 쓰는 중인 계정은 전환 대상에서 뺀다.
 #
-# Claude Code 의 키체인 항목 이름(공식 문서 + 여러 도구의 이슈로 확인):
+# Claude Code 의 키체인 항목 이름(공식 문서 + 실측):
 #   기본 ~/.claude → "Claude Code-credentials"
 #   그 밖의 폴더    → "Claude Code-credentials-<sha256(폴더 경로) 앞 8자>"
 # 기본 폴더를 CLAUDE_CONFIG_DIR 로 명시하면 접미사 붙은 이름을 찾아 로그인이 깨진다
-# → 기본 폴더 계정은 변수를 비운 채 띄운다.
-# ssh 세션처럼 키체인이 잠겨 있으면 Claude Code 는 <폴더>/.credentials.json 에 쓴다
-# → 둘 다 읽고 만료 시각이 더 늦은 쪽을 쓴다.
+# → 기본 폴더 풀은 변수를 비운 채 띄운다.
+POOL="${CCSWITCH_POOL:-default}"
 
-is_dirs_mode() {
-    [[ -f "$SEQUENCE_FILE" ]] && [[ "$(jq -r '.settings.mode // "global"' "$SEQUENCE_FILE" 2>/dev/null)" == "dirs" ]]
+pool_names() {
+    echo default
+    jq -r '.pools // {} | keys[] | select(. != "default")' "$SEQUENCE_FILE" 2>/dev/null || true
 }
 
-account_dir() {
-    local d
-    d=$(jq -r --arg n "$1" '.settings.dirs[$n] // ""' "$SEQUENCE_FILE" 2>/dev/null)
-    echo "${d/#\~/$HOME}"
+pool_exists() {
+    [[ "$1" == "default" ]] || jq -e --arg p "$1" '.pools[$p]' "$SEQUENCE_FILE" >/dev/null 2>&1
+}
+
+# 풀의 설정 폴더(절대 경로). default 는 늘 ~/.claude.
+pool_dir() {
+    local p="${1:-$POOL}" d
+    if [[ "$p" == "default" ]]; then
+        echo "$HOME/.claude"
+        return
+    fi
+    d=$(jq -r --arg p "$p" '.pools[$p].dir // ""' "$SEQUENCE_FILE" 2>/dev/null)
+    d="${d/#\~/$HOME}"
+    echo "${d%/}"
 }
 
 is_default_dir() {
@@ -583,35 +603,63 @@ dir_keychain_service() {
     fi
 }
 
-read_dir_credentials() {
-    local dir="${1%/}" kc="" file="" kc_exp=0 file_exp=0
-    kc=$(security find-generic-password -s "$(dir_keychain_service "$dir")" -w 2>/dev/null || true)
-    [[ -f "$dir/.credentials.json" ]] && file=$(cat "$dir/.credentials.json")
-    [[ -n "$kc" ]] && kc_exp=$(jq -r '.claudeAiOauth.expiresAt // 0' <<<"$kc" 2>/dev/null || echo 0)
-    [[ -n "$file" ]] && file_exp=$(jq -r '.claudeAiOauth.expiresAt // 0' <<<"$file" 2>/dev/null || echo 0)
-    [[ "$kc_exp" =~ ^[0-9]+$ ]] || kc_exp=0
-    [[ "$file_exp" =~ ^[0-9]+$ ]] || file_exp=0
-    if [[ -n "$file" ]] && (( file_exp > kc_exp )); then
-        echo "$file"
-    else
-        echo "$kc"
-    fi
+# 풀의 계정 번호들. default 풀은 .pools.default.accounts 가 없으면 등록된 전부.
+pool_accounts() {
+    local p="${1:-$POOL}"
+    jq -r --arg p "$p" '
+        if (.pools[$p].accounts // null) != null then .pools[$p].accounts[] | tostring
+        else .accounts | keys[] end' "$SEQUENCE_FILE" 2>/dev/null
 }
 
-# 계정 N 의 .claude.json. dirs 모드의 기본 폴더는 기존 규칙(get_claude_config_path)을 따른다.
-account_config_file() {
-    local num="$1" email="$2"
-    if is_dirs_mode; then
-        local dir
-        dir=$(account_dir "$num")
-        if is_default_dir "$dir"; then
-            get_claude_config_path
-        else
-            echo "${dir%/}/.claude.json"
+# 풀이 지금 쓰는 계정 번호(그 풀 설정 파일의 oauthAccount 기준). 없으면 빈 값.
+pool_current_account() {
+    ( POOL="$1"; identify_current_account )
+}
+
+# 지금 풀(POOL)에서 계정 N 으로 전환할 수 있나: 풀의 계정이고, 다른 풀이 쓰는 중이 아니어야 한다.
+pool_eligible() {
+    local n="$1" p
+    pool_accounts | grep -qx "$n" || return 1
+    for p in $(pool_names); do
+        [[ "$p" == "$POOL" ]] && continue
+        [[ "$(pool_current_account "$p")" == "$n" ]] && return 1
+    done
+    return 0
+}
+
+# stdin 의 gather_all_usage 행 중 지금 풀에서 고를 수 있는 것만(지금 계정은 늘 남긴다).
+filter_pool_rows() {
+    local current="${1:-}" row n
+    while IFS= read -r row; do
+        n="${row%%$'\x1f'*}"
+        [[ -z "$n" ]] && continue
+        if [[ "$n" == "$current" ]] || pool_eligible "$n"; then
+            printf '%s\n' "$row"
         fi
+    done
+}
+
+# 풀 쪽 .pools[p].active 기록(표시용). default 풀은 예전처럼 activeAccountNumber.
+set_pool_active() {
+    local n="$1" updated
+    if [[ "$POOL" == "default" ]]; then
+        updated=$(jq --arg n "$n" '.activeAccountNumber = ($n | tonumber)' "$SEQUENCE_FILE")
     else
-        echo "$BACKUP_DIR/configs/.claude-config-${num}-${email}.json"
+        updated=$(jq --arg p "$POOL" --arg n "$n" '.pools[$p].active = ($n | tonumber)' "$SEQUENCE_FILE")
     fi
+    write_json "$SEQUENCE_FILE" "$updated"
+}
+
+# 풀이 둘 이상이면 「Pools: default(~/.claude)=1 · work(~/.claude-work)=4」 한 줄.
+print_pools_line() {
+    local names p cur out=()
+    names=$(pool_names)
+    [[ $(echo "$names" | wc -l) -gt 1 ]] || return 0
+    for p in $names; do
+        cur=$(pool_current_account "$p")
+        out+=("$([[ "$p" == "$POOL" ]] && echo "*")$p($(pool_dir "$p" | sed "s|^$HOME|~|"))=${cur:--}")
+    done
+    echo "Pools: ${out[*]}"
 }
 
 # Read account credentials from backup.
@@ -621,15 +669,6 @@ account_config_file() {
 # If the keychain read fails (typical cron context), we fall back to that
 # file mirror. Same security tier as the existing $BACKUP_DIR/configs/ files.
 read_account_credentials() {
-    if is_dirs_mode; then
-        read_dir_credentials "$(account_dir "$1")"
-        return
-    fi
-    read_account_credentials_global "$@"
-}
-
-# 전역 방식의 백업 칸(키체인 "Claude Code-Account-N-email", 없으면 파일 사본).
-read_account_credentials_global() {
     local account_num="$1"
     local email="$2"
     local platform
@@ -695,7 +734,7 @@ read_account_config() {
     local account_num="$1"
     local email="$2"
     local config_file
-    config_file=$(account_config_file "$account_num" "$email")
+    config_file="$BACKUP_DIR/configs/.claude-config-${account_num}-${email}.json"
 
     if [[ -f "$config_file" ]]; then
         cat "$config_file"
@@ -900,7 +939,7 @@ account_has_backup() {
     # config 백업은 수 MB 라 변수로 읽지 않는다. 파일 크기만 본다.
     # (한 번 슬럽해서 ${var//...} 치환하면 bash 가 CPU 를 통째로 태운다.)
     local config_file
-    config_file=$(account_config_file "$account_num" "$email")
+    config_file="$BACKUP_DIR/configs/.claude-config-${account_num}-${email}.json"
     [[ -s "$config_file" ]] || return 1
     # 자격증명은 작다. 키체인 항목이 "있지만 비어 있는" 경우까지 걸러낸다.
     local creds
@@ -960,7 +999,7 @@ gather_all_usage() {
         # Missing field → treat as no extra usage. Used by the saturated
         # tier in pick_from_usage_data.
         has_extra=$(jq -r '.oauthAccount.hasExtraUsageEnabled // false' \
-            "$(account_config_file "$num" "$email")" 2>/dev/null)
+            "$BACKUP_DIR/configs/.claude-config-${num}-${email}.json" 2>/dev/null)
         [[ "$has_extra" == "true" ]] || has_extra=false
 
         # Fetch fresh; on any failure other than rate-limit, fall back to
@@ -972,7 +1011,7 @@ gather_all_usage() {
         # 읽은 값을 nobackup 판정과 fetch 양쪽에 재사용한다.
         local cred_cached config_backup
         cred_cached=$(read_account_credentials "$num" "$email")
-        config_backup=$(account_config_file "$num" "$email")
+        config_backup="$BACKUP_DIR/configs/.claude-config-${num}-${email}.json"
         if [[ ! -s "$config_backup" || -z "${cred_cached//[[:space:]]/}" ]]; then
             # 전환 불가 계정. 캐시 추정치로 채우면 "5h=0/7d=0" 처럼 보여 picker 가
             # 최우선으로 고른 뒤 perform_switch 에서 죽는다. 아예 후보에서 뺀다.
@@ -1675,6 +1714,7 @@ cmd_list() {
 
         echo "${prefix}${num}: $email ($label)${suffix}"
     done <<< "$seq_nums"
+    print_pools_line
 }
 
 # Switch to next account
@@ -1716,14 +1756,8 @@ cmd_switch() {
         exit 0
     fi
 
-    # Keep activeAccountNumber in sequence.json consistent with reality.
-    local stored_active
-    stored_active=$(jq -r '.activeAccountNumber' "$SEQUENCE_FILE")
-    if [[ "$stored_active" != "$active_account" ]]; then
-        local fixed
-        fixed=$(jq --arg num "$active_account" '.activeAccountNumber = ($num | tonumber)' "$SEQUENCE_FILE")
-        write_json "$SEQUENCE_FILE" "$fixed"
-    fi
+    # Keep the pool's active record in sequence.json consistent with reality.
+    set_pool_active "$active_account"
 
     # wait_for_claude_close
 
@@ -1744,6 +1778,7 @@ cmd_switch() {
     for ((step = 1; step < seq_len; step++)); do
         cand="${sequence[$(((current_index + step) % seq_len))]}"
         cand_email=$(jq -r --arg n "$cand" '.accounts[$n].email // ""' "$SEQUENCE_FILE")
+        pool_eligible "$cand" || continue
         if account_has_backup "$cand" "$cand_email"; then
             next_account="$cand"
             break
@@ -1751,7 +1786,7 @@ cmd_switch() {
         echo "Skipping Account-$cand ($cand_email): no backup credentials — re-login and run --add-account" >&2
     done
     if [[ -z "$next_account" ]]; then
-        echo "Error: no other account has backup credentials to switch to"
+        echo "Error: 이 풀에서 전환할 수 있는 다른 계정이 없다 (백업이 없거나 다른 풀이 쓰는 중)"
         exit 1
     fi
 
@@ -1827,11 +1862,17 @@ identify_current_account() {
 # Every other minute does nothing and prints nothing, so cron.log stays
 # quiet and we make at most one usage-API call per minute (the active
 # account), well under any rate limit.
+# 모든 풀을 차례로 한 번씩 tick 한다(풀마다 서브셸 — POOL 과 exit 이 서로 새지 않게).
 cmd_tick() {
     [[ -f "$SEQUENCE_FILE" ]] || return 0
-    # dirs 모드에서는 전역 전환을 하지 않는다. 에이전트가 남아 있어도 A 폴더를 덮어쓰지 않게.
-    # (계정 선택은 run/--pick 이 부를 때마다 사용량을 직접 조회한다.)
-    is_dirs_mode && return 0
+    local p
+    for p in $(pool_names); do
+        ( POOL="$p"; cmd_tick_pool ) || true
+    done
+}
+
+cmd_tick_pool() {
+    [[ -f "$SEQUENCE_FILE" ]] || return 0
 
     local minute current email util five seven
     minute=$(date +%M)
@@ -1877,6 +1918,7 @@ cmd_tick() {
     local any_fable_left=0 cfable
     if fable_priority_enabled; then
         for n in $(jq -r '.accounts | keys | map(tonumber) | sort | .[]' "$SEQUENCE_FILE" 2>/dev/null); do
+            [[ "$n" == "$current" ]] || pool_eligible "$n" || continue
             ncache="$USAGE_CACHE_DIR/account-$n"
             [[ -f "$ncache" ]] || continue
             cfable=$(awk '{print $7}' "$ncache" 2>/dev/null)
@@ -1894,6 +1936,7 @@ cmd_tick() {
 
     for n in $(jq -r '.accounts | keys | map(tonumber) | sort | .[]' "$SEQUENCE_FILE" 2>/dev/null); do
         [[ "$n" == "$current" ]] && continue
+        pool_eligible "$n" || continue
         ncache="$USAGE_CACHE_DIR/account-$n"
         [[ -f "$ncache" ]] || continue
         nseven_reset=$(awk '{print $4}' "$ncache" 2>/dev/null)
@@ -1963,7 +2006,10 @@ cmd_switch_lowest() {
 
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] Usage snapshot:"
     echo "$data" | render_usage_table "$current_account"
+    print_pools_line
 
+    # 이 풀에서 고를 수 있는 계정만 picker 에 넣는다(다른 풀이 쓰는 계정·풀 밖 계정 제외).
+    data=$(echo "$data" | filter_pool_rows "$current_account")
     target=$(echo "$data" | pick_from_usage_data "$current_account")
 
     if [[ -z "$target" ]]; then
@@ -2201,8 +2247,11 @@ cmd_show_usage() {
         return 1
     fi
     local current target target_status
+    # 표는 모든 계정을 보여 주고, `*` 와 아래 Next target 은 지금 풀(--pool) 기준이다.
     current=$(identify_current_account)
     echo "$data" | render_usage_table "$current"
+    print_pools_line
+    data=$(echo "$data" | filter_pool_rows "$current")
 
     # Preview: which account would --switch-lowest pick right now?
     target=$(echo "$data" | pick_from_usage_data "$current")
@@ -2267,8 +2316,9 @@ cmd_show_usage() {
 # Perform the actual account switch
 perform_switch() {
     local target_account="$1"
-    if is_dirs_mode; then
-        echo "Error: dirs 모드에서는 전역 전환을 하지 않는다 — '$0 run <번호|auto>' 로 띄운다"
+    # 이 풀의 계정이 아니거나 다른 풀이 쓰는 중이면 전환하지 않는다(같은 토큰을 두 폴더가 쓰면 한쪽이 무효).
+    if [[ "$(identify_current_account)" != "$target_account" ]] && ! pool_eligible "$target_account"; then
+        echo "Error: Account-$target_account 는 풀 '$POOL' 에서 쓸 수 없다 (풀의 계정이 아니거나 다른 풀이 쓰는 중)"
         exit 1
     fi
 
@@ -2291,17 +2341,22 @@ perform_switch() {
             '.accounts | to_entries[] | select((.value.organizationUuid // "") == $ou) | .key' \
             "$SEQUENCE_FILE" 2>/dev/null | head -n1)
     fi
-    if [[ -z "$current_account" ]]; then
+    if [[ -z "$current_account" && "$POOL" == "default" ]]; then
         current_account=$(jq -r '.activeAccountNumber' "$SEQUENCE_FILE")
     fi
 
     # Step 1: Backup current account
     # 자격증명은 토큰 주인의 칸에, 설정은 .claude.json 이 말하는 계정 칸에.
-    local current_config
-    current_config=$(cat "$(get_claude_config_path)")
+    # 새 풀처럼 지금 계정이 없으면 설정 백업은 건너뛴다(남의 칸을 덮어쓰지 않게).
+    local config_path current_config
+    config_path=$(get_claude_config_path)
+    [[ -f "$config_path" ]] || { mkdir -p "$(dirname "$config_path")"; echo '{}' > "$config_path"; chmod 600 "$config_path"; }
+    current_config=$(cat "$config_path")
 
     backup_live_credentials
-    write_account_config "$current_account" "$current_email" "$current_config"
+    if [[ -n "$current_account" && "$current_account" != "null" && -n "$current_email" ]]; then
+        write_account_config "$current_account" "$current_email" "$current_config"
+    fi
     
     # Step 2: Retrieve target account
     local target_creds target_config
@@ -2337,12 +2392,9 @@ perform_switch() {
     write_json "$(get_claude_config_path)" "$merged_config"
     
     # Step 4: Update state
+    set_pool_active "$target_account"
     local updated_sequence
-    updated_sequence=$(jq --arg num "$target_account" --arg now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
-        .activeAccountNumber = ($num | tonumber) |
-        .lastUpdated = $now
-    ' "$SEQUENCE_FILE")
-    
+    updated_sequence=$(jq --arg now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '.lastUpdated = $now' "$SEQUENCE_FILE")
     write_json "$SEQUENCE_FILE" "$updated_sequence"
 
     local target_org_uuid target_org_name target_label
@@ -2354,7 +2406,7 @@ perform_switch() {
     from_label=$(format_org_label "$current_org_name" "$current_org_uuid" "$current_email")
     notify_switch_macos "${current_email} (${from_label})" "${target_email} (${target_label})"
 
-    echo "Switched to Account-$target_account ($target_email - $target_label)"
+    echo "Switched to Account-$target_account ($target_email - $target_label)$([[ "$POOL" != "default" ]] && echo " [pool $POOL]")"
     # Display updated account list
     cmd_list
     echo ""
@@ -2691,126 +2743,133 @@ cmd_cron_remove() {
 }
 
 # Show usage
-# ── dirs 모드 명령 ───────────────────────────────────────────────────────────
+# ── 풀 명령 ─────────────────────────────────────────────────────────────────
 
-# 여유가 가장 많은 계정 번호를 찍는다. 풀 기본값 = settings.main(A)을 뺀 전부.
-#   --pick            → B·C 중에서
-#   --pick 1,2,3      → 이 번호들 중에서
-cmd_pick() {
-    is_dirs_mode || { echo "Error: --pick 은 dirs 모드에서만 쓴다 (먼저 --dirs-init)" >&2; exit 1; }
-    local pool="${1:-}"
-    if [[ -z "$pool" ]]; then
-        pool=$(jq -r '(.settings.main | tostring) as $m | .accounts | keys | map(select(. != $m)) | join(",")' "$SEQUENCE_FILE")
-    fi
-    local data target
-    data=$(gather_all_usage) || true
-    target=$(echo "$data" | /usr/bin/awk -F$'\x1f' -v pool=",$pool," 'index(pool, "," $1 ",") > 0' \
-        | pick_from_usage_data "")
-    [[ -n "$target" ]] || { echo "Error: 고를 수 있는 계정이 없다 (사용량 조회 실패)" >&2; exit 1; }
-    echo "$target"
-}
-
-# 그 계정 폴더로 claude 를 띄운다. 나머지 인자는 claude 에 그대로 넘긴다.
-#   run auto -p "…"   → B·C 중 여유 있는 쪽으로
-#   run 2             → Account-2 로
-cmd_run() {
-    is_dirs_mode || { echo "Error: run 은 dirs 모드에서만 쓴다 (먼저 --dirs-init)" >&2; exit 1; }
-    local which="${1:-auto}"
-    [[ $# -gt 0 ]] && shift
-    if [[ "$which" == "auto" ]]; then
-        which=$(cmd_pick)
-    fi
-    local dir
-    dir=$(account_dir "$which")
-    [[ -n "$dir" ]] || { echo "Error: Account-$which 의 폴더가 설정에 없다" >&2; exit 1; }
-    local bin
+# 풀 폴더로 claude 를 띄운다. 인자는 claude 에 그대로 넘긴다.
+# default 풀(~/.claude)은 CLAUDE_CONFIG_DIR 를 비운 채 띄운다(명시하면 키체인 이름이 달라진다).
+# 셸의 `claude` 를 이 명령으로 감싸도 되게, 풀을 안 쓰는 맥에서는 그냥 claude 를 실행한다.
+cmd_claude() {
+    local bin dir
     bin=$(command -v claude || echo "$HOME/.local/bin/claude")
-    echo "[ccswitch] Account-$which ($(jq -r --arg n "$which" '.accounts[$n].email' "$SEQUENCE_FILE")) · $dir" >&2
+    if [[ ! -f "$SEQUENCE_FILE" ]]; then
+        exec "$bin" "$@"
+    fi
+    pool_exists "$POOL" || { echo "Error: 풀 '$POOL' 이 없다 (--pool-list)" >&2; exit 1; }
+    dir=$(pool_dir)
     if is_default_dir "$dir"; then
         exec env -u CLAUDE_CONFIG_DIR "$bin" "$@"
-    else
-        exec env CLAUDE_CONFIG_DIR="${dir%/}" "$bin" "$@"
     fi
+    echo "[ccswitch] pool $POOL · $dir" >&2
+    exec env CLAUDE_CONFIG_DIR="$dir" "$bin" "$@"
 }
 
-# A(기본 폴더 ~/.claude) 를 정하고 나머지 계정마다 폴더를 만든다.
-#   B·C 폴더는 로그인·계정 상태(.credentials.json·.claude.json)만 따로 두고,
-#   나머지는 ~/.claude 를 가리키는 심볼릭으로 공유한다.
-#   사용자 범위 MCP 서버는 .claude.json 안에 있어 링크할 수 없으므로 복사한다.
-#   다시 돌리면 링크와 MCP 만 다시 맞춘다(로그인은 건드리지 않는다).
-readonly DIRS_SHARED=(settings.json CLAUDE.md skills agents commands hooks output-styles plugins projects history.jsonl keybindings.json)
+cmd_pool_list() {
+    local p cur email
+    for p in $(pool_names); do
+        cur=$(pool_current_account "$p")
+        email=$([[ -n "$cur" ]] && jq -r --arg n "$cur" '.accounts[$n].email' "$SEQUENCE_FILE")
+        printf '%s %-10s %-22s 계정 [%s]  지금: %s\n' \
+            "$([[ "$p" == "$POOL" ]] && echo '*' || echo ' ')" "$p" "$(pool_dir "$p" | sed "s|^$HOME|~|")" \
+            "$(pool_accounts "$p" | tr '\n' ' ' | sed 's/ $//')" "$([[ -n "$cur" ]] && echo "Account-$cur $email" || echo -)"
+    done
+}
 
-cmd_dirs_init() {
-    local main="${1:-}"
-    if [[ ! "$main" =~ ^[0-9]+$ ]] || ! jq -e --arg n "$main" '.accounts[$n]' "$SEQUENCE_FILE" >/dev/null 2>&1; then
-        echo "Usage: $0 --dirs-init <A 로 쓸 계정 번호>"
-        cmd_list
+# 새 풀 폴더가 ~/.claude 와 나눠 쓸 것(설정·스킬·플러그인·대화 기록). 로그인·계정 상태
+# (.credentials.json·.claude.json)만 폴더마다 따로다.
+readonly POOL_SHARED=(settings.json CLAUDE.md skills agents commands hooks output-styles plugins projects history.jsonl keybindings.json)
+
+# 풀의 계정 목록을 정한다. default 도 된다(정하지 않으면 등록된 전부).
+cmd_pool_set() {
+    local name="${1:-}"
+    [[ $# -ge 2 ]] || { echo "Usage: $0 --pool-set <이름> <번호…>"; exit 1; }
+    shift
+    pool_exists "$name" || { echo "Error: 풀 '$name' 이 없다"; exit 1; }
+    local n nums=()
+    for n in "$@"; do
+        jq -e --arg n "$n" '.accounts[$n]' "$SEQUENCE_FILE" >/dev/null || { echo "Error: Account-$n 이 없다"; exit 1; }
+        nums+=("$n")
+    done
+    local updated
+    updated=$(jq --arg p "$name" --argjson a "$(printf '%s\n' "${nums[@]}" | jq -s 'map(tonumber)')" \
+        '.pools[$p] = ((.pools[$p] // {}) + {accounts: $a})' "$SEQUENCE_FILE")
+    write_json "$SEQUENCE_FILE" "$updated"
+    echo "풀 '$name' 계정: ${nums[*]}"
+}
+
+# 풀을 더한다: 폴더를 만들고(공유 항목은 ~/.claude 로 링크), 쓸 수 있는 첫 계정으로 전환한다.
+cmd_pool_add() {
+    local name="${1:-}" dir="${2:-}"
+    if [[ -z "$name" || -z "$dir" || $# -lt 3 ]]; then
+        echo "Usage: $0 --pool-add <이름> <폴더> <번호…>   예) $0 --pool-add work ~/.claude-work 2 3"
         exit 1
     fi
+    shift 2
+    [[ "$name" =~ ^[A-Za-z0-9_-]+$ && "$name" != "default" ]] || { echo "Error: 풀 이름은 영문·숫자·-_ 이고 default 는 안 된다"; exit 1; }
+    pool_exists "$name" && { echo "Error: 풀 '$name' 이 이미 있다"; exit 1; }
+    dir="${dir/#\~/$HOME}"; dir="${dir%/}"
+    [[ "$dir" == /* ]] || dir="$PWD/$dir"
+    is_default_dir "$dir" && { echo "Error: ~/.claude 는 default 풀의 폴더다"; exit 1; }
+    local p
+    for p in $(pool_names); do
+        [[ "$(pool_dir "$p")" == "$dir" ]] && { echo "Error: $dir 는 풀 '$p' 가 쓰고 있다"; exit 1; }
+    done
 
-    # 지금까지 전역 전환으로 ~/.claude 에 어느 계정이 들어 있었는지 믿을 수 없다
-    # (.claude.json 과 키체인·파일 토큰이 서로 다른 계정이었던 적이 있다).
-    # dirs 모드로 넘어가기 전에 A 를 기본 폴더의 두 저장소 모두에 앉힌다(마지막 전역 전환).
-    if ! is_dirs_mode; then
-        # ssh 세션에서는 로그인 키체인이 잠겨 있어 키체인 쪽을 못 맞춘다.
-        if ! security show-keychain-info >/dev/null 2>&1; then
-            echo "Error: 로그인 키체인이 잠겨 있다. 먼저 푼다: security unlock-keychain ~/Library/Keychains/login.keychain-db"
-            exit 1
+    mkdir -p "$dir"
+    chmod 700 "$dir"
+    local it
+    for it in "${POOL_SHARED[@]}"; do
+        [[ -e "$HOME/.claude/$it" ]] || continue
+        if [[ -e "$dir/$it" && ! -L "$dir/$it" ]]; then
+            mv "$dir/$it" "$dir/$it.pre-pool"
+            echo "  옮김: $dir/$it → $it.pre-pool"
         fi
-        echo "기본 폴더(~/.claude)를 Account-$main 으로 맞춘다."
-        perform_switch "$main" >/dev/null || { echo "Error: Account-$main 으로 전환 실패"; exit 1; }
-    fi
-
-    local letters=(b c d e f g h i j) i=0 n dirs_json mcp
-    dirs_json=$(jq -n --arg m "$main" '{($m): "~/.claude"}')
+        ln -sfn "$HOME/.claude/$it" "$dir/$it"
+    done
+    # 사용자 범위 MCP 서버는 .claude.json 안에 있어 링크할 수 없으므로 복사한다.
+    local mcp
     mcp=$(jq -c '.mcpServers // {}' "$HOME/.claude.json" 2>/dev/null || echo '{}')
-    for n in $(jq -r '.accounts | keys | map(tonumber) | sort | .[]' "$SEQUENCE_FILE"); do
-        [[ "$n" == "$main" ]] && continue
-        local rel="~/.claude-${letters[$i]}" dir="$HOME/.claude-${letters[$i]}" it
-        i=$((i + 1))
-        mkdir -p "$dir"
-        chmod 700 "$dir"
-        for it in "${DIRS_SHARED[@]}"; do
-            [[ -e "$HOME/.claude/$it" ]] || continue
-            # /login 이 먼저 만든 것(테마만 든 settings.json 등)은 치워 두고 링크한다.
-            if [[ -e "$dir/$it" && ! -L "$dir/$it" ]]; then
-                mv "$dir/$it" "$dir/$it.pre-dirs"
-                echo "  옮김: $dir/$it → $it.pre-dirs"
-            fi
-            ln -sfn "$HOME/.claude/$it" "$dir/$it"
-        done
-        if [[ -f "$dir/.claude.json" ]]; then
-            jq --argjson m "$mcp" '.mcpServers = $m' "$dir/.claude.json" > "$dir/.claude.json.tmp" \
-                && mv "$dir/.claude.json.tmp" "$dir/.claude.json"
-        else
-            jq -n --argjson m "$mcp" '{mcpServers: $m}' > "$dir/.claude.json"
-        fi
-        chmod 600 "$dir/.claude.json"
-        dirs_json=$(jq --arg n "$n" --arg d "$rel" '. + {($n): $d}' <<<"$dirs_json")
-    done
+    if [[ -f "$dir/.claude.json" ]]; then
+        jq --argjson m "$mcp" '.mcpServers = $m' "$dir/.claude.json" > "$dir/.claude.json.tmp" && mv "$dir/.claude.json.tmp" "$dir/.claude.json"
+    else
+        jq -n --argjson m "$mcp" '{mcpServers: $m, hasCompletedOnboarding: true}' > "$dir/.claude.json"
+    fi
+    chmod 600 "$dir/.claude.json"
 
-    local updated
-    updated=$(jq --arg m "$main" --argjson d "$dirs_json" \
-        '.settings.mode = "dirs" | .settings.main = ($m | tonumber) | .settings.dirs = $d' "$SEQUENCE_FILE")
+    local rel="${dir/#$HOME/\~}" updated
+    updated=$(jq --arg p "$name" --arg d "$rel" '.pools[$p] = {dir: $d, accounts: []}' "$SEQUENCE_FILE")
     write_json "$SEQUENCE_FILE" "$updated"
+    cmd_pool_set "$name" "$@"
 
-    echo "dirs 모드로 바꿨다. 폴더마다 토큰의 실제 주인을 확인한다:"
-    # 전역 백업 토큰을 폴더에 복사하지 않는다 — 아직 도는 세션이 같은 토큰을 갱신하면
-    # 한쪽이 무효가 된다. 폴더마다 새로 /login 해서 독립된 토큰을 받는다.
-    local d email want have
-    for n in $(jq -r '.accounts | keys | map(tonumber) | sort | .[]' "$SEQUENCE_FILE"); do
-        d=$(account_dir "$n")
+    # 쓸 수 있는 첫 계정(다른 풀이 안 쓰고 백업이 있는 것)으로 전환해 폴더에 로그인 정보를 넣는다.
+    local n email
+    for n in "$@"; do
         email=$(jq -r --arg n "$n" '.accounts[$n].email' "$SEQUENCE_FILE")
-        want=$(jq -r --arg n "$n" '"\(.accounts[$n].uuid)\t\(.accounts[$n].organizationUuid // "")"' "$SEQUENCE_FILE")
-        have=$(creds_owner "$(read_dir_credentials "$d")")
-        if [[ "$have" == "$want" ]]; then
-            echo "  Account-$n $email → $d  ✓"
-        else
-            echo "  Account-$n $email → $d  ✗ 로그인 필요:  $0 run $n   (열리면 /login)"
+        if ( POOL="$name"; pool_eligible "$n" ) && account_has_backup "$n" "$email"; then
+            ( POOL="$name"; perform_switch "$n" >/dev/null )
+            echo "풀 '$name' ($rel) 을 만들고 Account-$n ($email) 으로 맞췄다."
+            echo "띄우기: $0 --pool $name claude"
+            return 0
         fi
     done
-    echo ""
-    echo "자동 전환 LaunchAgent 는 dirs 모드에서 할 일이 없다. 지우려면: $0 --agent-remove"
+    echo "풀 '$name' 을 만들었지만 지금 쓸 수 있는 계정이 없다(모두 다른 풀이 쓰는 중이거나 백업이 없다)."
+    echo "다른 풀을 전환해 계정을 비운 뒤: $0 --pool $name --switch-to <번호>"
+}
+
+# 풀을 지운다(default 는 못 지움). 폴더의 로그인 정보는 백업 칸으로 되돌린 뒤 폴더에서 지운다 —
+# 남겨 두면 그 계정이 다른 풀에서 쓰일 때 같은 토큰이 두 곳에 있게 된다. 폴더 자체는 남긴다.
+cmd_pool_remove() {
+    local name="${1:-}"
+    [[ -n "$name" && "$name" != "default" ]] || { echo "Usage: $0 --pool-remove <이름> (default 제외)"; exit 1; }
+    pool_exists "$name" || { echo "Error: 풀 '$name' 이 없다"; exit 1; }
+    local dir
+    dir=$(pool_dir "$name")
+    ( POOL="$name"; backup_live_credentials ) || true
+    security delete-generic-password -s "$(dir_keychain_service "$dir")" >/dev/null 2>&1 || true
+    rm -f "$dir/.credentials.json"
+    local updated
+    updated=$(jq --arg p "$name" 'del(.pools[$p])' "$SEQUENCE_FILE")
+    write_json "$SEQUENCE_FILE" "$updated"
+    echo "풀 '$name' 을 지웠다. 로그인 정보는 백업 칸으로 옮기고 $dir 에서는 지웠다(폴더는 남김)."
 }
 
 show_usage() {
@@ -2818,9 +2877,12 @@ show_usage() {
     echo "Usage: $0 [COMMAND]"
     echo ""
     echo "Commands:"
-    echo "  --dirs-init <num>                          dirs 모드: <num> 을 A(~/.claude)로, 나머지는 계정별 폴더"
-    echo "  run <num|auto> [claude args]               dirs 모드: 그 계정 폴더로 claude 실행 (auto = 여유 있는 쪽)"
-    echo "  --pick [nums]                              dirs 모드: 여유가 가장 많은 계정 번호"
+    echo "  --pool <name> <command>                    그 풀에 명령 적용 (기본 default = ~/.claude; CCSWITCH_POOL 도 됨)"
+    echo "  claude [claude args]                       풀 폴더로 claude 실행 (default 풀은 CLAUDE_CONFIG_DIR 없이)"
+    echo "  --pool-list                                풀 목록·폴더·계정·지금 계정"
+    echo "  --pool-add <name> <dir> <num...>           풀 추가 (공유 항목은 ~/.claude 로 링크, 쓸 수 있는 첫 계정으로 전환)"
+    echo "  --pool-set <name> <num...>                 풀의 계정 목록 변경 (default 도 가능)"
+    echo "  --pool-remove <name>                       풀 삭제 (로그인 정보는 백업 칸으로 되돌림)"
     echo "  --add-account                              Add current account to managed accounts"
     echo "  --remove-account <num>                     Remove account (number only, see --list)"
     echo "  --list                                     List all managed accounts"
@@ -2868,7 +2930,18 @@ main() {
     
     check_bash_version
     check_dependencies
-    
+
+    # 모든 명령 앞에 `--pool <이름>` 을 붙일 수 있다.
+    if [[ "${1:-}" == "--pool" ]]; then
+        [[ -n "${2:-}" ]] || { echo "Usage: $0 --pool <name> <command>"; exit 1; }
+        POOL="$2"
+        shift 2
+        if [[ -f "$SEQUENCE_FILE" ]] && ! pool_exists "$POOL"; then
+            echo "Error: 풀 '$POOL' 이 없다 (--pool-list)"
+            exit 1
+        fi
+    fi
+
     case "${1:-}" in
         --add-account)
             cmd_add_account
@@ -2936,17 +3009,24 @@ main() {
         --cron-remove)
             cmd_cron_remove
             ;;
-        --dirs-init)
+        claude)
             shift
-            cmd_dirs_init "$@"
+            cmd_claude "$@"
             ;;
-        --pick)
-            shift
-            cmd_pick "$@"
+        --pool-list)
+            cmd_pool_list
             ;;
-        run)
+        --pool-add)
             shift
-            cmd_run "$@"
+            cmd_pool_add "$@"
+            ;;
+        --pool-set)
+            shift
+            cmd_pool_set "$@"
+            ;;
+        --pool-remove)
+            shift
+            cmd_pool_remove "$@"
             ;;
         --help)
             show_usage

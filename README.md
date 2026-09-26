@@ -109,10 +109,15 @@ Next target: Account-3 (cold-warmup — 5h window untouched)
 | `--agent-remove` | LaunchAgent 제거 (`~/.claude-switch-backup` 보존) |
 | `--cron-install` | 레거시: cron 항목 설치 (macOS 에선 키체인 접근 불가 — agent 권장) |
 | `--cron-status` / `--cron-log [N]` / `--cron-remove` | 레거시 cron 제어 |
-| `--dirs-init <num>` | **dirs 모드** 켜기: `<num>` 을 A(기본 `~/.claude`)로, 나머지 계정은 `~/.claude-b`, `-c`… 폴더(`CLAUDE_CONFIG_DIR`)로. 폴더마다 토큰 주인을 확인해 ✓/✗ 표시 |
-| `run <num\|auto> [claude 인자]` | dirs 모드: 그 계정 폴더로 `claude` 실행. `auto` = A 를 뺀 계정 중 picker 가 고른 쪽 (예: `run auto -p "…"`) |
-| `--pick [nums]` | dirs 모드: picker 가 고른 계정 번호만 출력 |
+| `--pool <name> <명령>` | 그 **풀**에 명령 적용(기본 `default` = `~/.claude`, `CCSWITCH_POOL` 도 됨). 모든 명령 앞에 붙일 수 있다 |
+| `claude [claude 인자]` | 풀 폴더로 claude 실행(default 풀은 `CLAUDE_CONFIG_DIR` 없이). 셸의 `claude` 를 이걸로 감싸도 된다 |
+| `--pool-list` | 풀 목록 — 폴더·계정·지금 계정 |
+| `--pool-add <name> <dir> <num…>` | 풀 추가. 공유 항목(settings·skills·plugins·projects…)은 `~/.claude` 로 링크, 쓸 수 있는 첫 계정으로 전환 |
+| `--pool-set <name> <num…>` | 풀의 계정 목록 변경(default 도) |
+| `--pool-remove <name>` | 풀 삭제. 폴더의 로그인 정보는 백업 칸으로 되돌리고 지운다 |
 | `--help` | 도움말 |
+
+**풀**: 설정 폴더 하나 + 그 폴더가 돌려 쓰는 계정 목록. 풀 안에서는 토큰을 갈아 끼워 그 폴더의 세션 전부가 함께 바뀐다(예전 방식 그대로). `.pools` 가 없으면 모든 계정이 든 `default` 풀 하나다. **한 계정은 동시에 한 풀에서만** 쓴다 — 다른 풀이 쓰는 계정은 전환·picker·tick 에서 빠진다. `--tick` 은 모든 풀을 차례로 돈다.
 
 `--switch-to` 는 계정 번호, 이메일, 또는 같은 이메일이 여러 org 에 속할 경우 `"email (org)"` 형식으로 지정 가능.
 
