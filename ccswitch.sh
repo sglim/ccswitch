@@ -501,9 +501,15 @@ read_live_credentials_of() {
 # 살아 있는 저장소를 각각 «토큰 주인»의 칸에 백업한다.
 # 예전엔 .claude.json 이 말하는 계정 칸에 키체인 값을 무조건 썼다. 두 저장소가 어긋나면
 # 남의 토큰이 들어가, 1·2번 칸이 같은 토큰(나중에 폐기됨)을 갖게 됐다(2026-09-26 실측).
-# 주인을 확인 못 하거나(만료·폐기) 백업보다 오래된 토큰이면 쓰지 않는다.
+# 백업보다 오래된 토큰이면 쓰지 않는다.
+# 주인 확인이 안 되면(access token 만료 — 풀이 8시간 넘게 쉬면 흔하다):
+#   refresh token 이 어느 백업 칸과 같으면 이미 저장된 것이라 넘어가고,
+#   아니면 그 풀 설정 파일이 가리키는 계정 칸에, 그 칸보다 새 토큰일 때만 쓴다.
+#   그래도 못 쓰면 BACKUP_UNSAVED=1 — 이 토큰을 지우면 그 계정 로그인을 잃는다.
+BACKUP_UNSAVED=0
 backup_live_credentials() {
-    local src creds uuid org slot email old
+    local src creds uuid org slot email old rt n
+    BACKUP_UNSAVED=0
     for src in $(live_credential_sources); do
         creds=$(read_live_store "$src")
         [[ -n "${creds//[[:space:]]/}" ]] || continue
@@ -515,7 +521,26 @@ backup_live_credentials() {
                 "$SEQUENCE_FILE" 2>/dev/null | head -n1)
         fi
         if [[ -z "$slot" ]]; then
-            echo "  [$src] 토큰 주인을 확인 못 함(만료·폐기·미등록) — 백업하지 않음" >&2
+            rt=$(jq -r '.claudeAiOauth.refreshToken // ""' <<<"$creds" 2>/dev/null || true)
+            for n in $(jq -r '.accounts | keys[]' "$SEQUENCE_FILE"); do
+                if [[ -n "$rt" && "$(jq -r '.claudeAiOauth.refreshToken // ""' <<<"$(read_account_credentials "$n" "$(jq -r --arg n "$n" '.accounts[$n].email' "$SEQUENCE_FILE")")" 2>/dev/null)" == "$rt" ]]; then
+                    slot="same"
+                    break
+                fi
+            done
+            [[ "$slot" == "same" ]] && continue
+            slot=$(identify_current_account)
+            if [[ -n "$slot" ]]; then
+                email=$(jq -r --arg n "$slot" '.accounts[$n].email' "$SEQUENCE_FILE")
+                old=$(read_account_credentials "$slot" "$email")
+                if (( $(creds_expires_at "$creds") > $(creds_expires_at "$old") )); then
+                    echo "  [$src] 토큰 주인 확인 불가(만료) — 설정 파일 기준 Account-$slot 칸에 백업" >&2
+                    write_account_credentials "$slot" "$email" "$creds"
+                    continue
+                fi
+            fi
+            echo "  [$src] 토큰 주인을 확인 못 했고 저장된 적도 없는 토큰 — 백업하지 못함" >&2
+            BACKUP_UNSAVED=1
             continue
         fi
         email=$(jq -r --arg n "$slot" '.accounts[$n].email' "$SEQUENCE_FILE")
@@ -2863,7 +2888,13 @@ cmd_pool_remove() {
     pool_exists "$name" || { echo "Error: 풀 '$name' 이 없다"; exit 1; }
     local dir
     dir=$(pool_dir "$name")
-    ( POOL="$name"; backup_live_credentials ) || true
+    local unsaved
+    unsaved=$( POOL="$name"; backup_live_credentials >/dev/null; echo "$BACKUP_UNSAVED" )
+    if [[ "$unsaved" == "1" ]]; then
+        echo "Error: 풀 '$name' 폴더의 토큰을 백업 칸에 저장하지 못해 지우지 않았다(지우면 그 계정 로그인을 잃는다)."
+        echo "  그 풀로 claude 를 한 번 띄워 토큰을 갱신한 뒤 다시 시도: $0 --pool $name claude"
+        exit 1
+    fi
     security delete-generic-password -s "$(dir_keychain_service "$dir")" >/dev/null 2>&1 || true
     rm -f "$dir/.credentials.json"
     local updated
@@ -2872,12 +2903,180 @@ cmd_pool_remove() {
     echo "풀 '$name' 을 지웠다. 로그인 정보는 백업 칸으로 옮기고 $dir 에서는 지웠다(폴더는 남김)."
 }
 
+# ── TUI ─────────────────────────────────────────────────────────────────────
+# 인자 없이 `ccswitch.sh`(또는 --tui). 풀별 사용량 표를 보여 주고 키로 전환·실행·설정한다.
+# 사용량은 CCSWITCH_TUI_INTERVAL 초(기본 60)마다만 새로 받는다 — 자주 부르면 429 가 난다.
+# 동작은 전부 기존 명령 함수를 서브셸로 부른다(오류 exit 이 TUI 를 죽이지 않게).
+
+tui_restore() {
+    printf '\e[?25h\e[?1049l'
+}
+
+# 키 하나를 읽어 이름으로: UP DOWN ENTER TIMEOUT 또는 그 글자.
+tui_read_key() {
+    local k rest
+    if ! IFS= read -rsn1 -t "$1" k; then
+        echo TIMEOUT
+        return
+    fi
+    if [[ "$k" == $'\e' ]]; then
+        rest=""
+        IFS= read -rsn2 -t 1 rest || true
+        case "$rest" in
+            '[A') echo UP ;;
+            '[B') echo DOWN ;;
+            *)    echo ESC ;;
+        esac
+        return
+    fi
+    [[ -z "$k" ]] && { echo ENTER; return; }
+    echo "$k"
+}
+
+tui_draw() {
+    local data="$1" cur="$2" sel="$3" status="$4" age="$5" eligible="$6"
+    local fable agent pnext target
+    fable=$(jq -r 'if .settings.fablePriority then "켬" else "끔" end' "$SEQUENCE_FILE" 2>/dev/null)
+    if [[ -f "$AGENT_PLIST" ]]; then agent="켬"; else agent="끔"; fi
+    printf '\e[H\e[2J'
+    printf '\e[1mccswitch\e[0m  풀: \e[1m%s\e[0m (%s)   Fable 우선: %s   자동 전환: %s   사용량: %s초 전\n\n' \
+        "$POOL" "$(pool_dir | sed "s|^$HOME|~|")" "$fable" "$agent" "$age"
+    # 선택한 줄은 반전, 이 풀에서 못 쓰는 계정은 흐리게.
+    echo "$data" | render_usage_table "$cur" | awk -v sel="$sel" -v ok=" $eligible " '
+        NR == 1 { print; next }
+        {
+            n = ($1 == "*") ? $2 : $1
+            line = $0
+            if (index(ok, " " n " ") == 0) line = "\033[2m" line "  (이 풀 밖·다른 풀 사용 중)\033[0m"
+            if (n == sel) line = "\033[7m" line "\033[0m"
+            print line
+        }'
+    print_pools_line
+    target=$(echo "$data" | filter_pool_rows "$cur" | pick_from_usage_data "$cur" 2>/dev/null || true)
+    echo
+    [[ -n "$target" ]] && echo "자동 전환이 지금 고를 계정: Account-$target"
+    [[ $(pool_names | wc -l) -gt 1 ]] && pnext="  p 다음 풀" || pnext=""
+    printf '\n\e[2m↑↓/번호 선택  Enter 전환  c claude 띄우기%s  r 새로고침  h handicap  f Fable 우선  a 자동 전환  q 끝\e[0m\n' "$pnext"
+    [[ -n "$status" ]] && printf '\n%s\n' "$status"
+    return 0
+}
+
+cmd_tui() {
+    if [[ ! -t 0 || ! -t 1 ]]; then
+        show_usage
+        return
+    fi
+    if [[ ! -f "$SEQUENCE_FILE" ]]; then
+        cmd_list
+        return
+    fi
+    local interval="${CCSWITCH_TUI_INTERVAL:-60}"
+    local data="" fetched=0 now cur sel="" status="" key nums=() eligible n i out v script names
+    printf '\e[?1049h\e[?25l'
+    trap 'tui_restore' EXIT
+    trap 'tui_restore; exit 130' INT TERM
+    while true; do
+        now=$(date +%s)
+        if [[ -z "$data" ]] || (( now - fetched >= interval )); then
+            printf '\e[H\e[2J사용량을 받는 중…\n'
+            data=$(CCSWITCH_USE_CACHE=1 gather_all_usage 2>/dev/null) || true
+            fetched=$(date +%s)
+        fi
+        cur=$(identify_current_account)
+        nums=($(pool_accounts))
+        eligible=""
+        for n in "${nums[@]}"; do
+            if [[ "$n" == "$cur" ]] || pool_eligible "$n"; then eligible+="$n "; fi
+        done
+        [[ -z "$sel" ]] && sel="${cur:-${nums[0]}}"
+        tui_draw "$data" "$cur" "$sel" "$status" "$(( $(date +%s) - fetched ))" "$eligible"
+        key=$(tui_read_key 5)
+        [[ "$key" == TIMEOUT ]] && continue
+        status=""
+        case "$key" in
+            q|Q)
+                break
+                ;;
+            UP|k|DOWN|j)
+                for i in "${!nums[@]}"; do [[ "${nums[i]}" == "$sel" ]] && break; done
+                if [[ "$key" == UP || "$key" == k ]]; then
+                    (( i > 0 )) && sel="${nums[i-1]}"
+                else
+                    (( i + 1 < ${#nums[@]} )) && sel="${nums[i+1]}"
+                fi
+                ;;
+            [0-9])
+                for n in "${nums[@]}"; do [[ "$n" == "$key" ]] && sel="$key"; done
+                ;;
+            ENTER|s)
+                if [[ "$sel" == "$cur" ]]; then
+                    status="Account-$sel 은 이미 이 풀의 계정이다."
+                else
+                    printf '\e[H\e[2JAccount-%s 으로 전환 중…\n' "$sel"
+                    out=$( (perform_switch "$sel") 2>&1 ) || true
+                    status=$(echo "$out" | grep -E '^(Switched|Error)' | head -1)
+                    [[ "$status" == Switched* ]] && status="$status — 이 풀의 떠 있는 세션도 다음 토큰 갱신 때 바뀐다."
+                fi
+                ;;
+            c|C)
+                script=$(cron_script_path)
+                if [[ -n "${TMUX:-}" ]]; then
+                    tmux new-window -n "claude:$POOL" "CCSWITCH_POOL='$POOL' '$script' claude" \
+                        && status="tmux 새 창에서 claude 를 띄웠다 (풀 $POOL)." \
+                        || status="tmux 새 창을 못 열었다."
+                else
+                    tui_restore
+                    trap - EXIT INT TERM
+                    cmd_claude
+                fi
+                ;;
+            p|P)
+                names=($(pool_names))
+                for i in "${!names[@]}"; do [[ "${names[i]}" == "$POOL" ]] && break; done
+                POOL="${names[$(( (i + 1) % ${#names[@]} ))]}"
+                sel=""
+                ;;
+            r|R)
+                data=""
+                ;;
+            h|H)
+                printf '\e[?25h'
+                read -r -p "Account-$sel handicap (0-100): " v || true
+                printf '\e[?25l'
+                if [[ -n "$v" ]]; then
+                    out=$( (cmd_set_handicap "$sel" "$v") 2>&1 ) || true
+                    status=$(echo "$out" | tail -1)
+                    data=""
+                fi
+                ;;
+            f|F)
+                if [[ "$(jq -r '.settings.fablePriority // false' "$SEQUENCE_FILE")" == "true" ]]; then v=off; else v=on; fi
+                out=$( (cmd_fable_priority "$v") 2>&1 ) || true
+                status="Fable 우선: $v"
+                data=""
+                ;;
+            a|A)
+                if [[ -f "$AGENT_PLIST" ]]; then
+                    out=$( (cmd_agent_remove) 2>&1 ) || true
+                    status="자동 전환을 껐다."
+                else
+                    out=$( (cmd_agent_install) 2>&1 ) || true
+                    status="자동 전환을 켰다 (매분 tick, 정각에 전환)."
+                fi
+                ;;
+        esac
+    done
+    tui_restore
+    trap - EXIT INT TERM
+}
+
 show_usage() {
     echo "Multi-Account Switcher for Claude Code"
     echo "Usage: $0 [COMMAND]"
     echo ""
     echo "Commands:"
     echo "  --pool <name> <command>                    그 풀에 명령 적용 (기본 default = ~/.claude; CCSWITCH_POOL 도 됨)"
+    echo "  (인자 없음) | --tui                         계정 관리판(TUI): 사용량 표·전환·claude 띄우기·설정"
     echo "  claude [claude args]                       풀 폴더로 claude 실행 (default 풀은 CLAUDE_CONFIG_DIR 없이)"
     echo "  --pool-list                                풀 목록·폴더·계정·지금 계정"
     echo "  --pool-add <name> <dir> <num...>           풀 추가 (공유 항목은 ~/.claude 로 링크, 쓸 수 있는 첫 계정으로 전환)"
@@ -3031,8 +3230,8 @@ main() {
         --help)
             show_usage
             ;;
-        "")
-            show_usage
+        ""|--tui)
+            cmd_tui
             ;;
         *)
             echo "Error: Unknown command '$1'"

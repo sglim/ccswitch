@@ -20,6 +20,10 @@ LaunchAgent 는 `StartInterval 60` 으로 매분 `--tick` 을 실행. `cmd_tick`
 
 **풀**(`.pools[이름] = {dir, accounts, active}`, 없으면 `default` = `~/.claude` + 모든 계정): 모든 명령은 전역 `POOL`(`--pool`/`CCSWITCH_POOL`) 기준으로 돈다. 풀에 묶이는 곳은 `get_claude_config_path`·`read_live_store`·`write_credentials`(폴더·키체인 이름)뿐이고, 계정 선택은 `pool_eligible`(풀의 계정 + 다른 풀이 안 쓰는 중)과 `filter_pool_rows` 로 거른다. `cmd_tick` 은 풀마다 서브셸로 `cmd_tick_pool` 을 부른다. `perform_switch` 는 새 풀처럼 지금 계정이 없으면 설정 백업을 건너뛴다(남의 칸 덮어쓰기 방지).
 
+**TUI**(`cmd_tui`, 인자 없음/`--tui`): 동작은 전부 기존 명령 함수를 **서브셸로** 부른다 — 그 함수들의 `exit 1` 이 TUI 를 죽이지 않게. 사용량은 `CCSWITCH_TUI_INTERVAL`(기본 60초)마다만 받는다(짧게 잡으면 429). bash 3.2 의 `read -t` 는 정수 초만 받는다.
+
+**백업이 저장 못 한 토큰**: 풀이 오래 쉬어 access token 이 만료되면 프로필 API 로 주인을 못 확인한다. `backup_live_credentials` 는 refresh token 이 백업 칸과 같으면 넘어가고, 아니면 그 풀 설정 파일의 계정 칸에 더 새 토큰일 때만 쓰고, 그래도 못 쓰면 `BACKUP_UNSAVED=1`. `--pool-remove` 는 이때 지우지 않는다.
+
 wrapper 스크립트(`agent-switch-lowest`, 이름은 레거시)는 `exec ... ${CRON_COMMAND}` 로 `--tick` 을 호출. `CRON_COMMAND` 상수만 바꾸면 wrapper·plist 가 `--agent-install` 재실행 시 함께 갱신됨.
 
 ## 이 폴더에서 쓸 수 있는 slash 명령

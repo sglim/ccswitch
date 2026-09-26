@@ -2,11 +2,9 @@
 
 풀 구조(`--pool`, `--pool-add` …) 다음 단계. (2026-09-26 기록)
 
-## 1. TUI — `ccswitch.sh` 만 치면 뜨는 계정 관리판 (진행 중)
+## 1. TUI — 완료(2026-09-26). 남은 것
 
-- 풀별 사용량 표를 몇 초마다 갱신해서 보여 준다.
-- 키로 조작한다: 전환(그 풀 안에서), 새 tmux 창으로 그 풀의 claude 띄우기, 풀 바꿔 보기.
-- 설정 화면: handicap, Fable 우선, 자동 전환 켜기·끄기.
+- Fable handicap(`--set-fable-handicap`)·풀 추가/삭제는 아직 TUI 에 없다(명령으로).
 - 범위 밖: 원격 접속은 `ssh m5 -t ccswitch.sh` 로 하고, Claude 창들의 상태판은 tmux 훅으로 따로 둔다.
 
 ## 2. 모델에 따라 고르기 — `--switch-lowest --model fable|opus`

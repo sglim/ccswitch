@@ -109,6 +109,7 @@ Next target: Account-3 (cold-warmup — 5h window untouched)
 | `--agent-remove` | LaunchAgent 제거 (`~/.claude-switch-backup` 보존) |
 | `--cron-install` | 레거시: cron 항목 설치 (macOS 에선 키체인 접근 불가 — agent 권장) |
 | `--cron-status` / `--cron-log [N]` / `--cron-remove` | 레거시 cron 제어 |
+| (인자 없음) / `--tui` | **계정 관리판(TUI)**: 풀별 사용량 표(60초마다 갱신, `CCSWITCH_TUI_INTERVAL`), `↑↓`/번호 선택 · `Enter` 전환 · `c` claude 띄우기(tmux 안이면 새 창) · `p` 다음 풀 · `r` 새로고침 · `h` handicap · `f` Fable 우선 · `a` 자동 전환 켜기/끄기 · `q` 끝. 터미널이 아니면 도움말 |
 | `--pool <name> <명령>` | 그 **풀**에 명령 적용(기본 `default` = `~/.claude`, `CCSWITCH_POOL` 도 됨). 모든 명령 앞에 붙일 수 있다 |
 | `claude [claude 인자]` | 풀 폴더로 claude 실행(default 풀은 `CLAUDE_CONFIG_DIR` 없이). 셸의 `claude` 를 이걸로 감싸도 된다 |
 | `--pool-list` | 풀 목록 — 폴더·계정·지금 계정 |
