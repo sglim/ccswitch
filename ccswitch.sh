@@ -388,8 +388,9 @@ write_json() {
 
 # Check Bash version (4.4+ required)
 check_bash_version() {
-    local version
-    version=$(bash --version | head -n1 | grep -oE '[0-9]+\.[0-9]+' | head -n1)
+    # PATH 의 bash 가 아니라 지금 이 스크립트를 돌리는 bash 를 본다 — LaunchAgent 는 PATH 에 옛 /bin/bash(3.2)만
+    # 있어도 새 bash 의 절대경로로 실행되므로, PATH 를 보면 멀쩡한데도 멈춘다(brew bash 가 없는 맥에서).
+    local version="${BASH_VERSINFO[0]}.${BASH_VERSINFO[1]}"
     if ! awk -v ver="$version" 'BEGIN { exit (ver >= 4.4 ? 0 : 1) }'; then
         echo "Error: Bash 4.4+ required (found $version)"
         exit 1
