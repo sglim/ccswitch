@@ -102,6 +102,7 @@ Next target: Account-3 (cold-warmup — 5h window untouched)
 | `--why <명령>` | picker 판단 근거를 stderr 로 출력 (예: `--why --show-usage`). **LLM·API 호출 없음** — 이미 계산된 값을 찍기만 하므로 결과가 달라지지 않고 비용·지연도 0 |
 | `--fable-priority [on\|off]` | **Fable 우선 모드** 토글 (기본 off). 인자 없이 실행하면 현재 상태 표시 |
 | `--set-fable-handicap <num> <pct>` | 계정별 **Fable handicap** (0–100). 100 = 그 계정 Fable 을 가장 마지막에 사용 |
+| `--refresh [num...]` | 만료된 백업 토큰을 `claude -p` 로 갱신해 사용량을 다시 볼 수 있게 한다. 지금 쓰는 계정은 제외. 계정마다 Haiku 호출 1번(그 계정의 5h 창이 시작됨). 이미 죽은 토큰은 재로그인 안내 |
 | `--sync-current` | 현재 계정 백업을 live 키체인/config 로 새로고침 |
 | `--agent-install` | macOS LaunchAgent 설치 (매분 `--tick`) |
 | `--tick` | LaunchAgent 용 1분 tick: ①현재 계정 100% 포화 시 즉시 전환 ②다른 계정의 7d 주간한도가 방금 리셋되면 그 계정으로 즉시 전환 ③매시 `:00` 정기 switch-lowest. 그 외엔 no-op |

@@ -2513,6 +2513,117 @@ perform_switch() {
 # Useful after /login or silent token refresh while staying on the same account.
 # Only touches the single slot matched by (accountUuid, organizationUuid);
 # other accounts' backups are untouched.
+# 백업 칸의 만료된 토큰을 Claude Code 에게 갱신시킨다(--refresh).
+#
+# ccswitch 는 토큰을 직접 갱신하지 않는다 — 갱신 규칙을 흉내 내다 틀리면 계정이
+# 날아간다. 대신 계정마다 임시 설정 폴더(CLAUDE_CONFIG_DIR)에 백업 토큰을 넣고
+# `claude -p` 를 한 번 돌려, Claude Code 가 스스로 갱신하게 한다. 지금 쓰는 세션
+# (~/.claude)은 건드리지 않는다.
+#
+# 갱신된 토큰은 프로필 API 로 그 계정 본인 것인지·더 새것인지 확인한 뒤에만 백업
+# 칸에 쓰고, 임시 폴더와 그 키체인 항목은 바로 지운다(같은 토큰을 두 곳에 두면 한쪽
+# 갱신이 다른 쪽을 무효로 만든다).
+#
+# 비용: 계정마다 Haiku 호출 한 번("ok"). 그 계정의 5h 창이 시작된다.
+# 제외: 풀이 지금 쓰는 계정(Claude Code 가 관리), 백업 없는 계정, 아직 10분 이상
+# 유효한 토큰. 인자로 번호를 주면 그 계정만.
+cmd_refresh() {
+    [[ -f "$SEQUENCE_FILE" ]] || { echo "Error: No accounts are managed yet"; exit 1; }
+    local bin now_ms targets=() active=" " p n
+    bin=$(command -v claude || echo "$HOME/.local/bin/claude")
+    now_ms=$(( $(date +%s) * 1000 ))
+    for p in $(pool_names); do
+        n=$(pool_current_account "$p" 2>/dev/null || true)
+        [[ -n "$n" ]] && active+="$n "
+    done
+    # 지금 쓰는 계정을 못 찾으면 멈춘다. 그 계정을 건드리면 쓰고 있는 세션이 흔들린다.
+    if [[ "$active" == " " ]]; then
+        echo "Error: 지금 쓰는 계정을 확인하지 못해 중단한다."
+        exit 1
+    fi
+    if (( $# > 0 )); then
+        targets=("$@")
+    else
+        targets=($(jq -r '.accounts | keys | map(tonumber) | sort | .[]' "$SEQUENCE_FILE"))
+    fi
+
+    local email uuid org creds cfgfile old_exp new_exp D svc out rc new owner first reason stale
+    local ok=0 fail=0 skip=0
+    # 중간에 끊긴 이전 실행이 남긴 임시 폴더·키체인 항목을 먼저 치운다.
+    for stale in "$BACKUP_DIR"/refresh.*; do
+        [[ -d "$stale" ]] || continue
+        security delete-generic-password -s "$(dir_keychain_service "$stale")" -a "$USER" >/dev/null 2>&1 || true
+        rm -rf "$stale"
+    done
+    # 이번 실행이 도중에 끊겨도(Ctrl-C 등) 임시 폴더에 토큰이 남지 않게.
+    REFRESH_TMP=""
+    trap 'if [[ -n "$REFRESH_TMP" ]]; then security delete-generic-password -s "$(dir_keychain_service "$REFRESH_TMP")" -a "$USER" >/dev/null 2>&1; rm -rf "$REFRESH_TMP"; fi' EXIT
+    for n in "${targets[@]}"; do
+        email=$(jq -r --arg n "$n" '.accounts[$n].email // ""' "$SEQUENCE_FILE")
+        if [[ -z "$email" ]]; then echo "  Account-$n  없는 계정 — 건너뜀"; skip=$((skip+1)); continue; fi
+        if [[ "$active" == *" $n "* ]]; then
+            echo "  Account-$n  지금 쓰는 계정 — Claude Code 가 직접 갱신하므로 건너뜀"; skip=$((skip+1)); continue
+        fi
+        creds=$(read_account_credentials "$n" "$email")
+        # config 백업은 수백 KB 라 변수로 읽지 않는다 — ${var//…} 치환이 CPU 를 태워
+        # 몇 분씩 멈춘다(account_has_backup 과 같은 함정). 파일째 검사·복사한다.
+        cfgfile="$BACKUP_DIR/configs/.claude-config-${n}-${email}.json"
+        if [[ -z "${creds//[[:space:]]/}" || ! -s "$cfgfile" ]]; then
+            echo "  Account-$n  백업 없음 — 재로그인 후 --add-account 필요"; skip=$((skip+1)); continue
+        fi
+        old_exp=$(jq -r '.claudeAiOauth.expiresAt // 0' <<<"$creds" 2>/dev/null || echo 0)
+        if (( old_exp > now_ms + 600000 )); then
+            echo "  Account-$n  아직 유효 — 건너뜀"; skip=$((skip+1)); continue
+        fi
+        uuid=$(jq -r --arg n "$n" '.accounts[$n].uuid // ""' "$SEQUENCE_FILE")
+        org=$(jq -r --arg n "$n" '.accounts[$n].organizationUuid // ""' "$SEQUENCE_FILE")
+
+        D=$(mktemp -d "$BACKUP_DIR/refresh.XXXXXX")
+        REFRESH_TMP="$D"
+        svc=$(dir_keychain_service "$D")
+        cp "$cfgfile" "$D/.claude.json"
+        chmod 600 "$D/.claude.json"
+        # Claude Code 와 같은 규칙: 키체인이 되면 키체인, 잠겼으면 파일.
+        if ! security add-generic-password -U -s "$svc" -a "$USER" -w "$creds" 2>/dev/null; then
+            printf '%s' "$creds" > "$D/.credentials.json"
+            chmod 600 "$D/.credentials.json"
+        fi
+        # 실패(갱신 불가 등)해도 set -e 로 스크립트가 죽지 않게 rc 를 따로 받는다.
+        rc=0
+        out=$(cd "$D" && perl -e 'alarm shift; exec @ARGV' 90 \
+            env CLAUDE_CONFIG_DIR="$D" "$bin" -p --model haiku "ok" </dev/null 2>&1) || rc=$?
+        new=$(security find-generic-password -s "$svc" -a "$USER" -w 2>/dev/null || true)
+        [[ -z "$new" && -f "$D/.credentials.json" ]] && new=$(cat "$D/.credentials.json")
+        security delete-generic-password -s "$svc" -a "$USER" >/dev/null 2>&1 || true
+        rm -rf "$D"
+        REFRESH_TMP=""
+
+        new_exp=$(jq -r '.claudeAiOauth.expiresAt // 0' <<<"$new" 2>/dev/null || echo 0)
+        [[ "$new_exp" =~ ^[0-9]+$ ]] || new_exp=0
+        owner=$(creds_owner "$new")
+        if (( new_exp > old_exp )) && [[ "$owner" == "$uuid"$'\t'"$org" ]]; then
+            write_account_credentials "$n" "$email" "$new"
+            echo "  Account-$n  ✅ 갱신 ($email, 만료 $(date -r $((new_exp / 1000)) '+%m-%d %H:%M'))"
+            ok=$((ok+1))
+        else
+            first=$( { echo "$out" | grep -v '^Warning: no stdin' || true; } | head -1 | cut -c1-70 )
+            if [[ "$out" == *"could not be refreshed"* || "$out" == *"/login"* ]]; then
+                reason="refresh 토큰이 이미 죽음 — 이 계정으로 /login 후 --add-account 필요"
+            elif (( new_exp <= old_exp )); then
+                reason="토큰이 갱신되지 않음"
+            else
+                reason="갱신된 토큰의 주인이 이 계정이 아님 — 저장 안 함"
+            fi
+            echo "  Account-$n  ❌ $reason ($email; rc=$rc; ${first:-출력 없음})"
+            fail=$((fail+1))
+        fi
+        sleep 1
+    done
+    trap - EXIT
+    echo
+    echo "갱신 $ok · 실패 $fail · 건너뜀 $skip"
+}
+
 cmd_sync_current() {
     if [[ ! -f "$SEQUENCE_FILE" ]]; then
         echo "Error: No accounts are managed yet"
@@ -3198,6 +3309,7 @@ show_usage() {
     echo "  --fable-priority [on|off]                  Prefer accounts with Fable quota left (default: off; no arg = show status)"
     echo "  --set-fable-handicap <num> <percent>       Per-account Fable handicap (0-100); 100 = use that account's Fable last"
     echo "  --sync-current                             Refresh current account's backup from live state"
+    echo "  --refresh [num...]                         만료된 백업 토큰을 claude -p 로 갱신 (지금 쓰는 계정 제외, 계정당 Haiku 1회)"
     echo "  --agent-install                            Install/update the macOS LaunchAgent (recommended on macOS)"
     echo "  --agent-status                             Show LaunchAgent state (launchctl print)"
     echo "  --agent-kick                               Trigger the LaunchAgent now (launchctl kickstart)"
@@ -3291,6 +3403,10 @@ main() {
         --set-fable-handicap)
             shift
             cmd_set_fable_handicap "$@"
+            ;;
+        --refresh)
+            shift
+            cmd_refresh "$@"
             ;;
         --sync-current)
             cmd_sync_current
