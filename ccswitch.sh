@@ -2306,32 +2306,14 @@ cmd_set_handicap() {
 }
 
 # Print a per-account usage table using gather_all_usage + render.
-cmd_show_usage() {
-    if [[ ! -f "$SEQUENCE_FILE" ]]; then
-        echo "Error: No accounts are managed yet"
-        exit 1
-    fi
-    # Refresh active account's backup in case the user just /login'd. Same
-    # silent pattern as cmd_switch_lowest — failure is non-fatal.
-    ( cmd_sync_current ) >/dev/null 2>&1 || true
-
-    # Cache reads are enabled here (10s TTL) so repeated manual
-    # `--show-usage` invocations don't burn API quota. --switch-lowest
-    # never sets this var so its decisions still use live data.
-    local data
-    data=$(CCSWITCH_USE_CACHE=1 gather_all_usage)
-    local gather_rc=$?
-    if (( gather_rc == 2 )); then
-        echo "Aborted: rate-limited by Anthropic API; try again in a moment." >&2
-        return 1
-    fi
-    local current target target_status
-    # 표는 모든 계정을 보여 주고, `*` 와 아래 Next target 은 지금 풀(--pool) 기준이다.
-    current=$(identify_current_account)
-    echo "$data" | render_usage_table "$current"
-    print_pools_line
-    data=$(echo "$data" | filter_pool_rows "$current")
-
+# --switch-lowest 가 지금 할 일을 한 줄("Next target: ...")로 예측한다.
+# cmd_switch_lowest 와 같은 규칙(실측 유지·포화·hysteresis)을 따른다.
+# --show-usage 와 TUI 가 함께 쓴다 — 예측이 두 군데 있으면 한쪽만 고쳐져
+# 표시와 실제 동작이 어긋난다(2026-09: TUI 만 "Account-8" 을 계속 보여 줬다).
+# 입력: stdin 에 filter_pool_rows 까지 거친 TSV, $1 = 현재 계정.
+predict_next_target() {
+    local current="$1" data target target_status
+    data=$(cat)
     # Preview: which account would --switch-lowest pick right now?
     target=$(echo "$data" | pick_from_usage_data "$current")
     if [[ -z "$target" ]]; then
@@ -2394,6 +2376,35 @@ cmd_show_usage() {
             echo "Next target: Account-$target (lowest adjusted${fable_note})"
         fi
     fi
+}
+
+cmd_show_usage() {
+    if [[ ! -f "$SEQUENCE_FILE" ]]; then
+        echo "Error: No accounts are managed yet"
+        exit 1
+    fi
+    # Refresh active account's backup in case the user just /login'd. Same
+    # silent pattern as cmd_switch_lowest — failure is non-fatal.
+    ( cmd_sync_current ) >/dev/null 2>&1 || true
+
+    # Cache reads are enabled here (10s TTL) so repeated manual
+    # `--show-usage` invocations don't burn API quota. --switch-lowest
+    # never sets this var so its decisions still use live data.
+    local data
+    data=$(CCSWITCH_USE_CACHE=1 gather_all_usage)
+    local gather_rc=$?
+    if (( gather_rc == 2 )); then
+        echo "Aborted: rate-limited by Anthropic API; try again in a moment." >&2
+        return 1
+    fi
+    local current
+    # 표는 모든 계정을 보여 주고, `*` 와 아래 Next target 은 지금 풀(--pool) 기준이다.
+    current=$(identify_current_account)
+    echo "$data" | render_usage_table "$current"
+    print_pools_line
+    data=$(echo "$data" | filter_pool_rows "$current")
+
+    echo "$data" | predict_next_target "$current"
 }
 
 # Perform the actual account switch
@@ -2997,18 +3008,19 @@ tui_read_key() {
 # 입력이 밀려 끊겼다.
 tui_build_view() {
     local data="$1" cur="$2"
-    local fable agent pnext target
+    local fable agent pnext next
     fable=$(jq -r 'if .settings.fablePriority then "켬" else "끔" end' "$SEQUENCE_FILE" 2>/dev/null)
     if [[ -f "$AGENT_PLIST" ]]; then agent="켬"; else agent="끔"; fi
     TUI_HEAD=$(printf '\e[1mccswitch\e[0m  풀: \e[1m%s\e[0m (%s)   Fable 우선: %s   자동 전환: %s   사용량: ' \
         "$POOL" "$(pool_dir | sed "s|^$HOME|~|")" "$fable" "$agent")
     TUI_TABLE=$(echo "$data" | render_usage_table "$cur")
-    target=$(echo "$data" | filter_pool_rows "$cur" | pick_from_usage_data "$cur" 2>/dev/null || true)
+    # picker 결과를 그대로 보여 주지 않고, 실제 전환 규칙까지 거친 예측을 보여 준다.
+    next=$(echo "$data" | filter_pool_rows "$cur" | predict_next_target "$cur" 2>/dev/null || true)
     [[ $(pool_names | wc -l) -gt 1 ]] && pnext="  p 다음 풀" || pnext=""
     TUI_TAIL=$(
         print_pools_line
         echo
-        [[ -n "$target" ]] && echo "자동 전환이 지금 고를 계정: Account-$target"
+        [[ -n "$next" ]] && echo "자동 전환 판단: ${next#Next target: }"
         printf '\n\e[2m↑↓/번호 선택  Enter 전환  c claude 띄우기%s  r 새로고침  h handicap  f Fable 우선  a 자동 전환  q 끝\e[0m' "$pnext"
     )
     return 0
