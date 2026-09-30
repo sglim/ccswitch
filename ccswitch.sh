@@ -481,7 +481,11 @@ live_credential_sources() {
 
 read_live_store() {
     case "$1" in
-        keychain) security find-generic-password -s "$(dir_keychain_service "$(pool_dir)")" -w 2>/dev/null || true ;;
+        # -a "$USER" 필수. Claude Code 는 (서비스명, 계정속성=사용자명) 쌍으로 읽고 쓴다.
+        # 같은 서비스명에 다른 계정속성(예: "unknown")의 옛 항목이 남아 있으면, -a 없이
+        # 조회할 때 그 옛 항목이 먼저 걸려 현재 로그인 토큰을 못 읽는다(2026-09 실제 사례:
+        # 모든 계정이 "accessToken expired" 로 보이고 전부 오래된 캐시로 판단했다).
+        keychain) security find-generic-password -s "$(dir_keychain_service "$(pool_dir)")" -a "$USER" -w 2>/dev/null || true ;;
         file)     [[ -f "$(pool_dir)/.credentials.json" ]] && cat "$(pool_dir)/.credentials.json" || true ;;
     esac
 }
@@ -2114,6 +2118,14 @@ cmd_switch_lowest() {
     if (( cur_saturated == 1 )); then
         echo "Note: current Account-$current_account is saturated (5h ${cur_five}% / 7d ${cur_seven}%) — bypassing hysteresis."
     fi
+    # 실측으로 멀쩡한 현재 계정을 두고, 실측이 없는(캐시 추정치·조회 불가) 계정으로는
+    # 넘어가지 않는다. 캐시 추정치는 마지막 조회 이후 쓴 양이 빠져 있어 늘 실제보다 낮고,
+    # 그래서 picker 가 "가장 모르는 계정" 을 가장 좋아 보이게 고른다(2026-09: 다 쓴
+    # 8번을 7d 16% 로 보고 멀쩡한 9번에서 넘어가려 함). 현재 계정이 포화일 때만 넘어간다.
+    if (( cur_saturated == 0 )) && [[ "$current_status" == "ok" && "$target_status_pre" != "ok" ]]; then
+        echo "Decision: current Account-$current_account is live and healthy (5h ${cur_five}% / 7d ${cur_seven}%); target Account-$target has no live data (status=$target_status_pre) — staying."
+        return 0
+    fi
     if (( cur_saturated == 0 )) \
        && [[ "$current_status" == "ok" && "$target_status_pre" == "ok" \
           && "$current_adj" =~ ^[0-9]+$ && "$target_adj" =~ ^[0-9]+$ ]]; then
@@ -2347,6 +2359,10 @@ cmd_show_usage() {
         cs_p=$(echo "$data" | /usr/bin/awk -F$'\x1f' -v n="$current" '$1==n{print $4}')
         [[ "$cf_p" =~ ^[0-9]+$ ]] && (( cf_p >= 100 )) && cur_sat_p=1
         [[ "$cs_p" =~ ^[0-9]+$ ]] && (( cs_p >= 100 )) && cur_sat_p=1
+        if (( cur_sat_p == 0 )) && [[ "$current_status_p" == "ok" && "$target_status" != "ok" ]]; then
+            echo "Next target: Account-$current (staying — live and healthy; Account-$target has no live data, status=$target_status)"
+            return 0
+        fi
         if (( cur_sat_p == 0 )) \
            && [[ "$current_status_p" == "ok" && "$target_status" == "ok" \
               && "$current_adj_p" =~ ^[0-9]+$ && "$target_adj_p" =~ ^[0-9]+$ ]]; then
@@ -2937,7 +2953,7 @@ cmd_pool_remove() {
         echo "  그 풀로 claude 를 한 번 띄워 토큰을 갱신한 뒤 다시 시도: $0 --pool $name claude"
         exit 1
     fi
-    security delete-generic-password -s "$(dir_keychain_service "$dir")" >/dev/null 2>&1 || true
+    security delete-generic-password -s "$(dir_keychain_service "$dir")" -a "$USER" >/dev/null 2>&1 || true
     rm -f "$dir/.credentials.json"
     local updated
     updated=$(jq --arg p "$name" 'del(.pools[$p])' "$SEQUENCE_FILE")
