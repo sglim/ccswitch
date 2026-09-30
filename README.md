@@ -13,7 +13,7 @@
 - **다계정 관리** — 각 계정의 OAuth credential + config 를 `~/.claude-switch-backup` 에 안정된 계정 번호로 백업
 - **최저 사용량 계정으로 전환** — 관리 중인 모든 계정에 대해 (실제 switch 없이) Anthropic `/api/oauth/usage` 를 호출하고 tier 기반 알고리즘으로 최적 후보 선택
 - **계정별 handicap** — 덜 쓰고 싶은 계정 (예: 개인 계정) 에 가중치를 줘서 picker 가 일부러 회피하도록 설정
-- **LaunchAgent 자동 전환 (매분 tick)** — 1분마다 현재 계정만 가볍게 검사해서 **100% 포화 시 즉시 전환**, 그 외엔 **매시 정각(:00)에 정기 전환**. Aqua GUI 세션 안에서 돌기 때문에 키체인 접근과 macOS 알림이 정상 동작 (cron 도 지원되지만 키체인 접근 불가)
+- **LaunchAgent 자동 전환 (매분 tick)** — 1분마다 현재 계정만 가볍게 검사해서 **100% 포화 시 즉시 전환**, 그 외엔 **매시 한 번 정기 전환**(PC 마다 다른 분 — 조회가 한꺼번에 몰리지 않게). Aqua GUI 세션 안에서 돌기 때문에 키체인 접근과 macOS 알림이 정상 동작 (cron 도 지원되지만 키체인 접근 불가)
 - **메뉴바 위젯 (SwiftBar/xbar)** — 캐시 전용 readout 으로 현재 active 계정 + 계정별 5h/7d/extra-usage 표시, 클릭 한 번으로 "최저 계정 전환"
 - **새 데몬 없음** — bash 스크립트 하나 + 선택적 plist. 나머지는 시스템의 `launchd` + `security` + `curl` + `jq`
 
@@ -105,7 +105,7 @@ Next target: Account-3 (cold-warmup — 5h window untouched)
 | `--refresh [num...]` | 만료된 백업 토큰을 `claude -p` 로 갱신해 사용량을 다시 볼 수 있게 한다. 지금 쓰는 계정은 제외. 계정마다 Haiku 호출 1번(그 계정의 5h 창이 시작됨). 이미 죽은 토큰은 재로그인 안내 |
 | `--sync-current` | 현재 계정 백업을 live 키체인/config 로 새로고침 |
 | `--agent-install` | macOS LaunchAgent 설치 (매분 `--tick`) |
-| `--tick` | LaunchAgent 용 1분 tick: ①현재 계정 100% 포화 시 즉시 전환 ②다른 계정의 7d 주간한도가 방금 리셋되면 그 계정으로 즉시 전환 ③매시 `:00` 정기 switch-lowest. 그 외엔 no-op |
+| `--tick` | LaunchAgent 용 1분 tick: ①현재 계정 100% 포화 시 즉시 전환 ②다른 계정의 7d 주간한도가 방금 리셋되면 그 계정으로 즉시 전환 ③매시 한 번 정기 switch-lowest (분은 호스트 이름 해시로 PC 마다 다름, `CCSWITCH_SWEEP_MINUTE=0..59` 로 고정). 그 외엔 no-op |
 | `--agent-status` | `launchctl print` 으로 agent 상태 |
 | `--agent-kick` | agent 즉시 트리거 (`launchctl kickstart`) |
 | `--agent-remove` | LaunchAgent 제거 (`~/.claude-switch-backup` 보존) |
@@ -223,7 +223,7 @@ CCSWITCH_HYSTERESIS_DELTA=5 ccswitch.sh --switch-lowest
 | 로그인 키체인 읽기 | ✓ | 키체인 unlock 상태일 때만 |
 | macOS 알림 표시 | ✓ | ✗ |
 | 재부팅 후 생존 | ✓ | ✓ |
-| 스케줄 | 매분 `--tick` (`StartInterval 60`): 포화 시 즉시 전환 + 매시 :00 정기 | `0 * * * *` |
+| 스케줄 | 매분 `--tick` (`StartInterval 60`): 포화 시 즉시 전환 + 매시 한 번 정기(PC 별 분) | `0 * * * *` |
 
 **macOS 에서는 무조건 LaunchAgent 쓰세요.** cron 경로는 parity 와 edge case 용으로만 남겨둔 거고, macOS cron 은 키체인 접근이 안 돼서 `security find-generic-password` 가 빈 값을 반환하고 모든 fetch 가 실패합니다.
 

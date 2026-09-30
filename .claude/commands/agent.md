@@ -6,7 +6,7 @@ description: ccswitch 매시 자동 전환 LaunchAgent 상태 (launchctl print).
 
 핵심 필드:
 - `state = running` — 정상
-- `state = not running` — 이것도 정상. agent 는 매시 `:00` 에 한 번 돌고 나머지 시간은 idle 대기.
+- `state = not running` — 이것도 정상. agent 는 매분 tick 을 돌고(대부분 no-op) 나머지 시간은 idle 대기. 전체 조회는 매시 한 번, PC 마다 다른 분에 돈다.
 - `last exit code = 0` — 직전 hourly 실행 성공
 - `last exit code = non-zero` — 무언가 실패. `~/.claude-switch-backup/cron.log` tail 로 진단.
 

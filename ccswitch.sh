@@ -1959,12 +1959,27 @@ identify_current_account() {
 #   1) EMERGENCY: fetch ONLY the current account. If it's saturated
 #      (5h>=100 or 7d>=100), switch away immediately — hysteresis is
 #      forced off because staying on a 100% account is never right.
-#   2) HOURLY: on the top of the hour (:00) run the normal
-#      switch-lowest, which sweeps every account. This preserves the
-#      old once-an-hour cadence.
+#   2) HOURLY: once an hour, on this machine's sweep minute (see
+#      sweep_minute), run the normal switch-lowest, which sweeps every
+#      account. This preserves the old once-an-hour cadence.
 # Every other minute does nothing and prints nothing, so cron.log stays
 # quiet and we make at most one usage-API call per minute (the active
 # account), well under any rate limit.
+# 매시 전체 조회(sweep)를 돌릴 «분»(0-59).
+# 예전엔 모든 PC 가 :00 에 돌려, 같은 공인 IP·같은 계정으로 조회(PC 당 계정 수만큼)가
+# 한꺼번에 몰렸다(429). 호스트 이름 해시로 PC 마다 다른 분에 흩는다.
+# CCSWITCH_SWEEP_MINUTE 로 고정할 수 있다.
+sweep_minute() {
+    local m="${CCSWITCH_SWEEP_MINUTE:-}"
+    if [[ -z "$m" ]]; then
+        m=$( (hostname -s 2>/dev/null || hostname) | cksum | cut -d' ' -f1 )
+    elif [[ ! "$m" =~ ^[0-9]+$ ]] || (( 10#$m > 59 )); then
+        echo "Error: CCSWITCH_SWEEP_MINUTE must be 0-59 (got '$m')" >&2
+        return 1
+    fi
+    echo $(( 10#$m % 60 ))
+}
+
 # 모든 풀을 차례로 한 번씩 tick 한다(풀마다 서브셸 — POOL 과 exit 이 서로 새지 않게).
 cmd_tick() {
     [[ -f "$SEQUENCE_FILE" ]] || return 0
@@ -2071,8 +2086,10 @@ cmd_tick_pool() {
         fi
     done
 
-    # Hourly cadence: only act on the top of the hour.
-    if [[ "$minute" == "00" ]]; then
+    # Hourly cadence: only act on this machine's sweep minute.
+    local sweep
+    sweep=$(sweep_minute)
+    if (( 10#$minute == sweep )); then
         cmd_switch_lowest
     fi
     return 0
@@ -2899,7 +2916,7 @@ cmd_agent_install() {
     echo "  plist:    $AGENT_PLIST"
     # echo "  schedule: every 60 seconds (StartInterval)"
     echo "  schedule: every 60s (--tick): emergency switch if the active"
-    echo "            account hits 100%, plus the normal hourly switch at :00"
+    echo "            account hits 100%, plus the normal hourly switch at :$(printf '%02d' "$(sweep_minute)")"
     echo "  log:      $CRON_LOG"
     echo ""
     echo "To trigger immediately:  launchctl kickstart $(agent_service_target)"
@@ -3310,7 +3327,7 @@ cmd_tui() {
                     status="자동 전환을 껐다."
                 else
                     out=$( (cmd_agent_install) 2>&1 ) || true
-                    status="자동 전환을 켰다 (매분 tick, 정각에 전환)."
+                    status="자동 전환을 켰다 (매분 tick, 매시 $(sweep_minute)분에 전환)."
                 fi
                 ;;
         esac
@@ -3337,7 +3354,7 @@ show_usage() {
     echo "  --switch                                   Rotate to next account in sequence"
     echo "  --switch-to <num|email|\"email (org)\">       Switch to specific account"
     echo "  --switch-lowest                            Switch to the account with lowest adjusted utilization"
-    echo "  --tick                                     LaunchAgent tick: emergency switch if active account is 100%, else hourly switch at :00"
+    echo "  --tick                                     LaunchAgent tick: emergency switch if active account is 100%, else hourly switch (per-machine minute)"
     echo "  --show-usage                               Print per-account 5h/7d utilization + handicap table"
     echo "  --set-handicap <num> <percent>             Set per-account handicap (0-100); higher = picked less often"
     echo "  --why <command>                            Print picker reasoning to stderr (no API/LLM; e.g. --why --show-usage)"
