@@ -2991,31 +2991,51 @@ tui_read_key() {
     echo "$k"
 }
 
-tui_draw() {
-    local data="$1" cur="$2" sel="$3" status="$4" age="$5" eligible="$6"
+# 화면에서 무거운 부분(현재 계정 기준 표·picker·풀 줄)을 한 번 만들어 둔다.
+# 화살표는 선택 줄만 바꾸므로 이걸 다시 만들 필요가 없다. 예전엔 키 하나에
+# 이 전부와 현재 계정·풀 검사까지 다시 계산해 약 0.3초씩 걸렸고, 누르고 있으면
+# 입력이 밀려 끊겼다.
+tui_build_view() {
+    local data="$1" cur="$2"
     local fable agent pnext target
     fable=$(jq -r 'if .settings.fablePriority then "켬" else "끔" end' "$SEQUENCE_FILE" 2>/dev/null)
     if [[ -f "$AGENT_PLIST" ]]; then agent="켬"; else agent="끔"; fi
-    printf '\e[H\e[2J'
-    printf '\e[1mccswitch\e[0m  풀: \e[1m%s\e[0m (%s)   Fable 우선: %s   자동 전환: %s   사용량: %s초 전\n\n' \
-        "$POOL" "$(pool_dir | sed "s|^$HOME|~|")" "$fable" "$agent" "$age"
-    # 선택한 줄은 반전, 이 풀에서 못 쓰는 계정은 흐리게.
-    echo "$data" | render_usage_table "$cur" | awk -v sel="$sel" -v ok=" $eligible " '
-        NR == 1 { print; next }
-        {
-            n = ($1 == "*") ? $2 : $1
-            line = $0
-            if (index(ok, " " n " ") == 0) line = "\033[2m" line "  (이 풀 밖·다른 풀 사용 중)\033[0m"
-            if (n == sel) line = "\033[7m" line "\033[0m"
-            print line
-        }'
-    print_pools_line
+    TUI_HEAD=$(printf '\e[1mccswitch\e[0m  풀: \e[1m%s\e[0m (%s)   Fable 우선: %s   자동 전환: %s   사용량: ' \
+        "$POOL" "$(pool_dir | sed "s|^$HOME|~|")" "$fable" "$agent")
+    TUI_TABLE=$(echo "$data" | render_usage_table "$cur")
     target=$(echo "$data" | filter_pool_rows "$cur" | pick_from_usage_data "$cur" 2>/dev/null || true)
-    echo
-    [[ -n "$target" ]] && echo "자동 전환이 지금 고를 계정: Account-$target"
     [[ $(pool_names | wc -l) -gt 1 ]] && pnext="  p 다음 풀" || pnext=""
-    printf '\n\e[2m↑↓/번호 선택  Enter 전환  c claude 띄우기%s  r 새로고침  h handicap  f Fable 우선  a 자동 전환  q 끝\e[0m\n' "$pnext"
-    [[ -n "$status" ]] && printf '\n%s\n' "$status"
+    TUI_TAIL=$(
+        print_pools_line
+        echo
+        [[ -n "$target" ]] && echo "자동 전환이 지금 고를 계정: Account-$target"
+        printf '\n\e[2m↑↓/번호 선택  Enter 전환  c claude 띄우기%s  r 새로고침  h handicap  f Fable 우선  a 자동 전환  q 끝\e[0m' "$pnext"
+    )
+    return 0
+}
+
+# 만들어 둔 화면에 선택 줄 강조만 입혀 그린다(가벼움).
+tui_draw() {
+    local sel="$1" status="$2" age="$3" eligible="$4" frame
+    frame=$(
+        printf '%s%s초 전\n\n' "$TUI_HEAD" "$age"
+        # 선택한 줄은 반전, 이 풀에서 못 쓰는 계정은 흐리게.
+        printf '%s\n' "$TUI_TABLE" | awk -v sel="$sel" -v ok=" $eligible " '
+            NR == 1 { print; next }
+            {
+                n = ($1 == "*") ? $2 : $1
+                line = $0
+                if (index(ok, " " n " ") == 0) line = "\033[2m" line "  (이 풀 밖·다른 풀 사용 중)\033[0m"
+                if (n == sel) line = "\033[7m" line "\033[0m"
+                print line
+            }'
+        printf '%s\n' "$TUI_TAIL"
+        [[ -n "$status" ]] && printf '\n%s\n' "$status"
+        true
+    )
+    # 화면 전체를 지우지(\e[2J) 않고 커서를 맨 위로 옮겨 덮어쓴 뒤, 줄 끝(\e[K)과
+    # 화면 끝(\e[J)의 남은 글자만 지운다. 한 번에 써서 깜빡이지 않는다.
+    printf '\e[H%s\e[J' "$(printf '%s\n' "$frame" | sed $'s/$/\e[K/')"
     return 0
 }
 
@@ -3029,7 +3049,7 @@ cmd_tui() {
         return
     fi
     local interval="${CCSWITCH_TUI_INTERVAL:-60}"
-    local data="" fetched=0 now cur sel="" status="" key nums=() eligible n i out v script names
+    local data="" fetched=0 now cur sel="" status="" key nums=() eligible n i out v script names view_dirty=1
     printf '\e[?1049h\e[?25l'
     trap 'tui_restore' EXIT
     trap 'tui_restore; exit 130' INT TERM
@@ -3039,18 +3059,29 @@ cmd_tui() {
             printf '\e[H\e[2J사용량을 받는 중…\n'
             data=$(CCSWITCH_USE_CACHE=1 gather_all_usage 2>/dev/null) || true
             fetched=$(date +%s)
+            view_dirty=1
         fi
-        cur=$(identify_current_account)
-        nums=($(pool_accounts))
-        eligible=""
-        for n in "${nums[@]}"; do
-            if [[ "$n" == "$cur" ]] || pool_eligible "$n"; then eligible+="$n "; fi
-        done
-        [[ -z "$sel" ]] && sel="${cur:-${nums[0]}}"
-        tui_draw "$data" "$cur" "$sel" "$status" "$(( $(date +%s) - fetched ))" "$eligible"
+        if (( view_dirty )); then
+            cur=$(identify_current_account)
+            # 표는 계정 번호 순(4,5,…,14)인데 pool_accounts 는 jq keys 라 문자열 순
+            # (10,11,…,4,…,9)이다. 그대로 쓰면 화살표가 표와 다른 순서로 움직인다
+            # (9 에서 ↓ 가 안 먹고 ↑ 가 8 로 감). 화면과 같은 숫자 순으로 맞춘다.
+            nums=($(pool_accounts | sort -n))
+            eligible=""
+            for n in "${nums[@]}"; do
+                if [[ "$n" == "$cur" ]] || pool_eligible "$n"; then eligible+="$n "; fi
+            done
+            [[ -z "$sel" ]] && sel="${cur:-${nums[0]}}"
+            tui_build_view "$data" "$cur"
+            view_dirty=0
+        fi
+        tui_draw "$sel" "$status" "$(( $(date +%s) - fetched ))" "$eligible"
         key=$(tui_read_key 5)
-        [[ "$key" == TIMEOUT ]] && continue
+        # 5초간 입력 없음: 자동 전환 등으로 계정이 바뀌었을 수 있으니 다음에 다시 계산.
+        [[ "$key" == TIMEOUT ]] && { view_dirty=1; continue; }
         status=""
+        # 기본은 다시 계산. 선택만 바꾸는 키(화살표·번호)는 아래에서 0 으로 되돌린다.
+        view_dirty=1
         case "$key" in
             q|Q)
                 break
@@ -3062,9 +3093,11 @@ cmd_tui() {
                 else
                     (( i + 1 < ${#nums[@]} )) && sel="${nums[i+1]}"
                 fi
+                view_dirty=0
                 ;;
             [0-9])
                 for n in "${nums[@]}"; do [[ "$n" == "$key" ]] && sel="$key"; done
+                view_dirty=0
                 ;;
             ENTER|s)
                 if [[ "$sel" == "$cur" ]]; then
