@@ -97,7 +97,7 @@ Next target: Account-3 (cold-warmup — 5h window untouched)
 | `--switch` | `sequence.json` 순서대로 다음 계정 round-robin |
 | `--switch-to <num\|email\|"email (org)">` | 특정 계정으로 전환 |
 | `--switch-lowest` | picker 가 추천하는 계정으로 전환 |
-| `--show-usage` | 사용량 표 출력 (switch 안 함, 10초 API 캐시 활용) |
+| `--show-usage` | 사용량 표 출력 (switch 안 함, 2분 API 캐시 활용 — `CCSWITCH_USAGE_CACHE_TTL=0` 으로 강제 조회) |
 | `--set-handicap <num> <pct>` | 계정별 handicap 설정 (0–100); 클수록 picker 가 회피 |
 | `--why <명령>` | picker 판단 근거를 stderr 로 출력 (예: `--why --show-usage`). **LLM·API 호출 없음** — 이미 계산된 값을 찍기만 하므로 결과가 달라지지 않고 비용·지연도 0 |
 | `--fable-priority [on\|off]` | **Fable 우선 모드** 토글 (기본 off). 인자 없이 실행하면 현재 상태 표시 |
@@ -259,7 +259,8 @@ ln -s "$HOME/.local/bin/ccswitch-statusbar" \
 ├── sequence.json                          # 계정 레지스트리 (정본)
 ├── configs/.claude-config-<N>-<email>.json
 ├── credentials/.claude-credentials-<N>-<email>.json
-├── usage-cache/account-<N>                # 10초 TTL, fetch 성공 시마다 갱신
+├── usage-cache/account-<N>                # 120초 TTL(CCSWITCH_USAGE_CACHE_TTL), fetch 성공 시마다 갱신
+├── owner-cache                            # 토큰 sha256 → 주인(uuid, org). 토큰 만료까지 profile API 재호출 생략
 └── cron.log                               # LaunchAgent / cron 출력 sink
 
 ~/Library/LaunchAgents/com.ccswitch.auto-switch.plist

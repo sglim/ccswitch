@@ -41,12 +41,18 @@ readonly USAGE_API_BETA="oauth-2025-04-20"
 readonly USAGE_API_UA="claude-code/2.1"
 readonly USAGE_API_TIMEOUT=5
 
-# Per-account usage cache. Short TTL because we want decisions on near-fresh
-# data; only --show-usage / repeat manual queries benefit. --switch-lowest
-# (the LaunchAgent path) deliberately bypasses the cache by never setting
-# CCSWITCH_USE_CACHE=1, so its decision always reflects current API state.
+# Per-account usage cache. Only display paths (--show-usage, TUI) read it;
+# --switch-lowest (the LaunchAgent path) deliberately bypasses the cache by
+# never setting CCSWITCH_USE_CACHE=1, so its decision always reflects current
+# API state. The TTL used to be 10s, which meant nearly every manual
+# --show-usage re-queried every account (9 calls, ~8s) and risked 429s.
+# The tick rewrites the current account's cache every minute anyway, so a
+# longer TTL only delays the *other* accounts' numbers.
+# Force a live fetch: CCSWITCH_USAGE_CACHE_TTL=0 ccswitch.sh --show-usage
 readonly USAGE_CACHE_DIR="$BACKUP_DIR/usage-cache"
-readonly USAGE_CACHE_TTL=10
+readonly USAGE_CACHE_TTL="${CCSWITCH_USAGE_CACHE_TTL:-120}"
+# 토큰 해시 → 주인(accountUuid, organizationUuid). creds_owner 참고.
+readonly OWNER_CACHE_FILE="$BACKUP_DIR/owner-cache"
 
 # Switch hysteresis. If the picker's target is on a different account
 # but its adjusted utilization is only this many percentage points
@@ -497,13 +503,39 @@ creds_expires_at() {
 }
 
 # 토큰의 실제 주인 → "accountUuid<TAB>organizationUuid". 만료·폐기·네트워크 실패면 빈 값.
+# access token 의 주인은 바뀌지 않으므로, 한 번 확인한 토큰은 만료 시각까지 다시 묻지 않는다.
+# (예전엔 --show-usage·--switch-lowest 를 부를 때마다 profile API 를 불렀다.)
+# 캐시 파일에는 토큰 자체가 아니라 sha256 만 둔다.
 creds_owner() {
-    local token
+    local token hash exp now_ms hit owner tmp
     token=$(jq -r '.claudeAiOauth.accessToken // empty' <<<"$1" 2>/dev/null || true)
     [[ -n "$token" ]] || return 0
-    curl -s -m 10 "https://api.anthropic.com/api/oauth/profile" \
+    hash=$(printf '%s' "$token" | shasum -a 256 | cut -c1-64)
+    exp=$(creds_expires_at "$1")
+    now_ms=$(( $(date +%s) * 1000 ))
+    if [[ -f "$OWNER_CACHE_FILE" ]]; then
+        hit=$(awk -F'\t' -v h="$hash" -v now="$now_ms" \
+            '$1 == h && $4 + 0 > now + 0 { print $2 "\t" $3; exit }' "$OWNER_CACHE_FILE" 2>/dev/null || true)
+        if [[ -n "$hit" ]]; then
+            echo "$hit"
+            return 0
+        fi
+    fi
+    owner=$(curl -s -m 10 "https://api.anthropic.com/api/oauth/profile" \
         -H "Authorization: Bearer $token" -H "anthropic-beta: oauth-2025-04-20" 2>/dev/null \
-        | jq -r 'select(.account.uuid and .organization.uuid) | [.account.uuid, .organization.uuid] | @tsv' 2>/dev/null || true
+        | jq -r 'select(.account.uuid and .organization.uuid) | [.account.uuid, .organization.uuid] | @tsv' 2>/dev/null || true)
+    [[ -n "$owner" ]] || return 0
+    if (( exp > now_ms )); then
+        tmp="$OWNER_CACHE_FILE.$$"
+        {
+            # 만료된 줄과 같은 토큰의 옛 줄은 버린다 — 파일이 계속 자라지 않게.
+            if [[ -f "$OWNER_CACHE_FILE" ]]; then
+                awk -F'\t' -v h="$hash" -v now="$now_ms" '$1 != h && $4 + 0 > now + 0' "$OWNER_CACHE_FILE" 2>/dev/null || true
+            fi
+            printf '%s\t%s\t%s\n' "$hash" "$owner" "$exp"
+        } > "$tmp" 2>/dev/null && /bin/mv -f "$tmp" "$OWNER_CACHE_FILE" 2>/dev/null || true
+    fi
+    echo "$owner"
 }
 
 # 살아 있는 저장소 중 주인이 (accountUuid, organizationUuid) 인 것. 없으면 빈 값.
@@ -2387,7 +2419,7 @@ cmd_show_usage() {
     # silent pattern as cmd_switch_lowest — failure is non-fatal.
     ( cmd_sync_current ) >/dev/null 2>&1 || true
 
-    # Cache reads are enabled here (10s TTL) so repeated manual
+    # Cache reads are enabled here (USAGE_CACHE_TTL) so repeated manual
     # `--show-usage` invocations don't burn API quota. --switch-lowest
     # never sets this var so its decisions still use live data.
     local data
@@ -3172,7 +3204,7 @@ cmd_tui() {
         return
     fi
     local interval="${CCSWITCH_TUI_INTERVAL:-60}"
-    local data="" fetched=0 now cur sel="" status="" key nums=() eligible n i out v script names view_dirty=1
+    local data="" fetched=0 now cur sel="" status="" key nums=() eligible n i out v script names view_dirty=1 use_cache=1
     printf '\e[?1049h\e[?25l'
     trap 'tui_restore' EXIT
     trap 'tui_restore; exit 130' INT TERM
@@ -3180,7 +3212,8 @@ cmd_tui() {
         now=$(date +%s)
         if [[ -z "$data" ]] || (( now - fetched >= interval )); then
             printf '\e[H\e[2J사용량을 받는 중…\n'
-            data=$(CCSWITCH_USE_CACHE=1 gather_all_usage 2>/dev/null) || true
+            data=$(CCSWITCH_USE_CACHE=$use_cache gather_all_usage 2>/dev/null) || true
+            use_cache=1
             fetched=$(date +%s)
             view_dirty=1
         fi
@@ -3251,7 +3284,9 @@ cmd_tui() {
                 sel=""
                 ;;
             r|R)
+                # 직접 누른 새로고침은 캐시를 건너뛰고 API 에서 새로 받는다.
                 data=""
+                use_cache=0
                 ;;
             h|H)
                 printf '\e[?25h'
