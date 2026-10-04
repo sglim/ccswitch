@@ -94,6 +94,24 @@ is_cold_candidate() {
     (( seven < COLD_MAX_SEVEN ))
 }
 
+# 주간 한도가 곧 리셋되는데 아직 여유가 남은 계정 — 안 쓰면 그 여유가 그대로
+# 버려진다. urgency_bonus 만으로는 이걸 못 살린다: 방금 리셋된 계정은 raw 가 0
+# 이라 adjusted 가 0 이고, adjusted 는 0 아래로 안 내려가므로 임박 계정이
+# 아무리 급해도 못 이긴다(2026-10: 7d 35%·리셋 16시간 남은 계정이 adjusted 2 로
+# 방금 리셋된 0 짜리에게 졌다). 그래서 점수가 아니라 tier 로 올린다.
+# cold 보다 아래에 두는 이유: 5h 클럭을 시작해 두는 투자가 한 번은 먼저다.
+readonly EXPIRING_MAX_HOURS="${CCSWITCH_EXPIRING_MAX_HOURS:-24}"
+readonly EXPIRING_MAX_SEVEN="${CCSWITCH_EXPIRING_MAX_SEVEN:-90}"
+
+is_expiring_candidate() {
+    local seven="$1" seven_rem="$2"
+    [[ "$seven" =~ ^[0-9]+$ ]] || return 1
+    (( seven < EXPIRING_MAX_SEVEN )) || return 1
+    [[ "$seven_rem" =~ ^[0-9]+$ ]] || return 1
+    (( seven_rem > 0 )) || return 1
+    (( seven_rem <= EXPIRING_MAX_HOURS * 3600 ))
+}
+
 # Fable 우선 모드. 기본은 꺼짐 — 켜지 않으면 ccswitch 는 예전처럼
 # adjusted(전체 사용량)만 보고 고른다. Fable 을 주력으로 쓰는 사람만
 # 켜면 되고, 그 외 사용자의 동작은 이 플래그가 꺼져 있는 한 바뀌지 않는다.
@@ -1341,6 +1359,8 @@ pick_from_usage_data() {
     # 있으면 소진된 계정은 어떤 tier 로도 이기지 못하게 하기 위함.
     local cold_fable_num="" cold_fable_score="" cold_fable_rem=""
     local healthy_num="" healthy_score="" healthy_rem=""
+    # 리셋 임박 + 여유 있는 계정. healthy 보다 먼저 쓴다.
+    local expiring_num="" expiring_rem="" expiring_score=""
     # maxed-extra has two collectors: "_alt" excludes the current active
     # num to enforce round-robin; the unsuffixed one keeps every ext
     # candidate so we can still fall back when current is the only one.
@@ -1477,6 +1497,16 @@ pick_from_usage_data() {
             elif (( adjusted == healthy_score && seven_rem_norm < healthy_rem )); then
                 healthy_num="$num"; healthy_score="$adjusted"; healthy_rem="$seven_rem_norm"
             fi
+            # 리셋이 임박한데 여유가 남은 계정. 가장 임박한 것부터,
+            # 동률이면 adjusted 낮은 쪽.
+            if is_expiring_candidate "$seven" "$seven_rem"; then
+                why_acct "$num" "expiring 후보: 7d ${seven}% (< ${EXPIRING_MAX_SEVEN}), 리셋까지 $(( seven_rem / 3600 ))h (<= ${EXPIRING_MAX_HOURS}h)"
+                if [[ -z "$expiring_num" ]] \
+                   || (( seven_rem < expiring_rem )) \
+                   || (( seven_rem == expiring_rem && adjusted < expiring_score )); then
+                    expiring_num="$num"; expiring_rem="$seven_rem"; expiring_score="$adjusted"
+                fi
+            fi
             # Fable 여유가 남은 계정(0 <= fable < 100)만 따로 모은다.
             # 정렬 키는 Fable 사용률 오름차순(가장 많이 남은 순), 동률이면
             # adjusted, 그 다음 7d reset 임박 순.
@@ -1544,6 +1574,9 @@ pick_from_usage_data() {
         why "→ 선택: Account-$cold_num (tier=cold — 5h 클럭 시작)"
         # ── 여기부터 Fable 소진/미지원 그룹 ───────────────────────────
         echo "$cold_num"
+    elif [[ -n "$expiring_num" ]]; then
+        why "→ 선택: Account-$expiring_num (tier=expiring — 7d 리셋까지 $(( expiring_rem / 3600 ))h, 여유 남음)"
+        echo "$expiring_num"
     elif [[ -n "$healthy_num" ]]; then
         why "→ 선택: Account-$healthy_num (tier=healthy — adjusted ${healthy_score} 최저)"
         echo "$healthy_num"
@@ -2192,10 +2225,14 @@ cmd_switch_lowest() {
     target_seven=$(echo "$data" | /usr/bin/awk -F$'\x1f' -v n="$target" '$1==n{print $4}')
     target_five_rem=$(echo "$data" | /usr/bin/awk -F$'\x1f' -v n="$target" '$1==n{print $8}')
     target_extra=$(echo "$data" | /usr/bin/awk -F$'\x1f' -v n="$target" '$1==n{print $10}')
+    local target_seven_rem
+    target_seven_rem=$(echo "$data" | /usr/bin/awk -F$'\x1f' -v n="$target" '$1==n{print $9}')
     if [[ "$target_status" == "unavailable" ]]; then
         echo "Decision: rotating to stale Account-$target (idle ≥1h, token expired — switching so Claude Code refreshes it)."
     elif is_cold_candidate "$target_five" "$target_five_rem" "$target_seven"; then
         echo "Decision: warming up cold Account-$target (5h window untouched — touching now starts the clock for a future reset)."
+    elif is_expiring_candidate "$target_seven" "$target_seven_rem"; then
+        echo "Decision: using Account-$target before its weekly window resets in $(( target_seven_rem / 3600 ))h (7d ${target_seven}% — the rest would be wasted)."
     elif [[ "$target_five" == "100" || "$target_seven" == "100" ]]; then
         if [[ "$target_extra" == "true" ]]; then
             echo "Decision: switching to Account-$target (all candidates saturated; this one has extra-usage available)."
@@ -2375,6 +2412,7 @@ predict_next_target() {
         target_five=$(echo "$data" | /usr/bin/awk -F$'\x1f' -v n="$target" '$1==n{print $3}')
         target_seven=$(echo "$data" | /usr/bin/awk -F$'\x1f' -v n="$target" '$1==n{print $4}')
         target_five_rem=$(echo "$data" | /usr/bin/awk -F$'\x1f' -v n="$target" '$1==n{print $8}')
+        target_seven_rem=$(echo "$data" | /usr/bin/awk -F$'\x1f' -v n="$target" '$1==n{print $9}')
         target_extra=$(echo "$data" | /usr/bin/awk -F$'\x1f' -v n="$target" '$1==n{print $10}')
         # Hysteresis preview: mirror the guard in cmd_switch_lowest so
         # the operator sees "would stay" instead of a misleading
@@ -2415,6 +2453,8 @@ predict_next_target() {
             echo "Next target: Account-$target (stale-token refresh)"
         elif is_cold_candidate "$target_five" "$target_five_rem" "$target_seven"; then
             echo "Next target: Account-$target (cold-warmup — 5h window untouched${fable_note})"
+        elif is_expiring_candidate "$target_seven" "$target_seven_rem"; then
+            echo "Next target: Account-$target (expiring — 7d resets in $(( target_seven_rem / 3600 ))h, ${target_seven}% used${fable_note})"
         elif [[ "$target_five" == "100" || "$target_seven" == "100" ]]; then
             if [[ "$target_extra" == "true" ]]; then
                 echo "Next target: Account-$target (saturated but has extra-usage)"
