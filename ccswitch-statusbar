@@ -109,7 +109,10 @@ sat_emoji() {
 }
 
 # ============ tmux 한 줄 ============
-# 「#4 14% 80%」 = 계정 번호 · 5시간 · 주간. 80% 이상 노랑, 100% 빨강(tmux 기본 색 이름 — 테마 팔레트를 따른다).
+# 「#4 14%(4h21m) 80%(2h1m) · 전체 79%」 = 지금 계정 번호 · 5시간(초기화까지) · 주간(초기화까지) ·
+# 등록된 모든 계정의 주간 사용률 평균(캐시가 있는 계정만, 지난 초기화는 0 으로 — 메뉴바와 같은 규칙).
+# 지금 계정이 아닌 계정의 캐시는 그 계정을 마지막으로 조회한 때 값이다(다른 맥에서 쓴 만큼은 늦게 반영된다).
+# 80% 이상 노랑, 100% 빨강(tmux 기본 색 이름 — 테마 팔레트를 따른다).
 # 색을 되돌릴 때 #[fg=default] 를 쓰므로 tmux 쪽에서 #[…,push-default] 로 감싸 둔다.
 # 캐시가 5분 넘게 안 바뀌었으면(점검 에이전트가 멈춘 것) 끝에 「· N분 전」을 붙인다 — 조용히 옛 값을 보이지 않게.
 if (( TMUX_MODE )); then
@@ -125,10 +128,25 @@ if (( TMUX_MODE )); then
         else printf '%s%%' "$v"
         fi
     }
+    rem() {
+        local r="${1:-0}"
+        [[ "$r" =~ ^[0-9]+$ ]] && (( r > now )) && printf '(%s)' "$(fmt_rem $(( r - now )))"
+        return 0
+    }
+    sum=0 n=0
+    for num in $(jq -r '.accounts | keys[]' "$SEQUENCE_FILE"); do
+        [[ -f "$CACHE_DIR/account-$num" ]] || continue
+        read -r af as af_r as_r _ _ afbl < "$CACHE_DIR/account-$num"
+        read -r af as afbl <<< "$(apply_rollover "${af:-0}" "${as:-0}" "${af_r:-0}" "${as_r:-0}" "${afbl:-}" "$now")"
+        [[ "$as" =~ ^[0-9]+$ ]] || continue
+        sum=$(( sum + as )) n=$(( n + 1 ))
+    done
+    total=""
+    (( n > 0 )) && total=" · 전체 $(pct $(( (sum + n / 2) / n )))"
     age=$(( now - $(/usr/bin/stat -f %m "$cache" 2>/dev/null || /usr/bin/stat -c %Y "$cache" 2>/dev/null || echo "$now") ))
     stale=""
     (( age > 300 )) && stale=" · $(( age / 60 ))분 전"
-    echo "#${active_num} $(pct "$f") $(pct "$s")${stale}"
+    echo "#${active_num} $(pct "$f")$(rem "$f_r") $(pct "$s")$(rem "$s_r")${total}${stale}"
     exit 0
 fi
 
