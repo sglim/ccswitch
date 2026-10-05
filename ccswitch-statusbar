@@ -112,7 +112,8 @@ sat_emoji() {
 # 「#4 14%(4h21m) 80%(2h1m) · 전체 79%」 = 지금 계정 번호 · 5시간(초기화까지) · 주간(초기화까지) ·
 # 등록된 모든 계정의 주간 사용률 평균(캐시가 있는 계정만, 지난 초기화는 0 으로 — 메뉴바와 같은 규칙).
 # 지금 계정이 아닌 계정의 캐시는 그 계정을 마지막으로 조회한 때 값이다(다른 맥에서 쓴 만큼은 늦게 반영된다).
-# 80% 이상 노랑, 100% 빨강(tmux 기본 색 이름 — 테마 팔레트를 따른다).
+# 색은 claude-hud 의 사용량 색과 같은 기준: 75% 미만 밝은 파랑 · 75~89% 밝은 자주 · 90% 이상 빨강
+# (tmux 기본 색 이름 — 터미널 테마 팔레트를 따른다). HUD 의 「소모 속도(pace)」 경고는 넣지 않았다.
 # 색을 되돌릴 때 #[fg=default] 를 쓰므로 tmux 쪽에서 #[…,push-default] 로 감싸 둔다.
 # 캐시가 5분 넘게 안 바뀌었으면(점검 에이전트가 멈춘 것) 끝에 「· N분 전」을 붙인다 — 조용히 옛 값을 보이지 않게.
 if (( TMUX_MODE )); then
@@ -123,10 +124,11 @@ if (( TMUX_MODE )); then
     pct() {
         local v="$1"
         [[ "$v" =~ ^[0-9]+$ ]] || { printf '?%%'; return; }
-        if (( v >= 100 )); then printf '#[fg=red]%s%%#[fg=default]' "$v"
-        elif (( v >= 80 )); then printf '#[fg=yellow]%s%%#[fg=default]' "$v"
-        else printf '%s%%' "$v"
+        local c=brightblue
+        if (( v >= 90 )); then c=red
+        elif (( v >= 75 )); then c=brightmagenta
         fi
+        printf '#[fg=%s]%s%%#[fg=default]' "$c" "$v"
     }
     rem() {
         local r="${1:-0}"
