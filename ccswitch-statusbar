@@ -112,23 +112,27 @@ sat_emoji() {
 # 「#4 14%(4h21m) 80%(2h1m) · 전체 79%」 = 지금 계정 번호 · 5시간(초기화까지) · 주간(초기화까지) ·
 # 등록된 모든 계정의 주간 사용률 평균(캐시가 있는 계정만, 지난 초기화는 0 으로 — 메뉴바와 같은 규칙).
 # 지금 계정이 아닌 계정의 캐시는 그 계정을 마지막으로 조회한 때 값이다(다른 맥에서 쓴 만큼은 늦게 반영된다).
-# 색은 claude-hud 의 사용량 색과 같은 기준: 75% 미만 밝은 파랑 · 75~89% 밝은 자주 · 90% 이상 빨강
-# (tmux 기본 색 이름 — 터미널 테마 팔레트를 따른다). HUD 의 「소모 속도(pace)」 경고는 넣지 않았다.
-# 색을 되돌릴 때 #[fg=default] 를 쓰므로 tmux 쪽에서 #[…,push-default] 로 감싸 둔다.
+# 색은 claude-hud 의 사용량 색과 같은 기준: 75% 미만 파랑 · 75~89% 자주 · 90% 이상 빨강.
+# HUD 의 「소모 속도(pace)」 경고는 넣지 않았다.
+# 색값은 그릴 때마다 tmux 테마 옵션(catppuccin 의 @thm_fg·@thm_blue·@thm_mauve·@thm_red)에서 읽는다 —
+# 테마를 바꾸면 따라간다. 숫자 뒤는 @thm_fg 로 되돌린다(#[fg=default] 는 칸의 글자색이 아니라
+# 터미널 기본 글자색이 된다 — 2026-10-05 출력 코드로 확인). 옵션이 없으면 터미널 색 이름으로.
 # 캐시가 5분 넘게 안 바뀌었으면(점검 에이전트가 멈춘 것) 끝에 「· N분 전」을 붙인다 — 조용히 옛 값을 보이지 않게.
 if (( TMUX_MODE )); then
     cache="$CACHE_DIR/account-$active_num"
     [[ -n "$active_num" && -f "$cache" ]] || { echo "ccswitch ?"; exit 0; }
     read -r f s f_r s_r _ _ fbl < "$cache"
     read -r f s fbl <<< "$(apply_rollover "${f:-0}" "${s:-0}" "${f_r:-0}" "${s_r:-0}" "${fbl:-}" "$now")"
+    read -r c_fg c_ok c_warn c_crit <<< "$(tmux display -p '#{@thm_fg} #{@thm_blue} #{@thm_mauve} #{@thm_red}' 2>/dev/null)" || true
+    c_fg=${c_fg:-default} c_ok=${c_ok:-brightblue} c_warn=${c_warn:-brightmagenta} c_crit=${c_crit:-red}
     pct() {
         local v="$1"
         [[ "$v" =~ ^[0-9]+$ ]] || { printf '?%%'; return; }
-        local c=brightblue
-        if (( v >= 90 )); then c=red
-        elif (( v >= 75 )); then c=brightmagenta
+        local c=$c_ok
+        if (( v >= 90 )); then c=$c_crit
+        elif (( v >= 75 )); then c=$c_warn
         fi
-        printf '#[fg=%s]%s%%#[fg=default]' "$c" "$v"
+        printf '#[fg=%s]%s%%#[fg=%s]' "$c" "$v" "$c_fg"
     }
     rem() {
         local r="${1:-0}"
