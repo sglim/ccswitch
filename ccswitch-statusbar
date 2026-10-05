@@ -20,7 +20,13 @@ readonly SEQUENCE_FILE="$BACKUP_DIR/sequence.json"
 readonly CACHE_DIR="$BACKUP_DIR/usage-cache"
 readonly CCSWITCH_BIN="$HOME/.local/bin/ccswitch.sh"
 
+# --tmux: tmux 상태줄용 한 줄만 찍는다(메뉴바 형식·드롭다운 없음). 캐시만 읽는다.
+#   status-right 에 #(~/.local/bin/ccswitch-statusbar --tmux)
+TMUX_MODE=0
+[[ "${1:-}" == "--tmux" ]] && TMUX_MODE=1
+
 if [[ ! -f "$SEQUENCE_FILE" ]]; then
+    (( TMUX_MODE )) && exit 0
     echo "ccswitch ⛔️"
     echo "---"
     echo "ccswitch is not configured (no sequence.json) | color=#aaaaaa"
@@ -101,6 +107,35 @@ sat_emoji() {
     else echo "🟢"
     fi
 }
+
+# ============ tmux 한 줄 ============
+# 「#4 5h 14% 4h21m · 7d 80% 2h1m」. 80% 이상 노랑, 100% 빨강(tmux 기본 색 이름 — 테마 팔레트를 따른다).
+# 색을 되돌릴 때 #[fg=default] 를 쓰므로 tmux 쪽에서 #[…,push-default] 로 감싸 둔다.
+# 캐시가 5분 넘게 안 바뀌었으면(점검 에이전트가 멈춘 것) 끝에 「· N분 전」을 붙인다 — 조용히 옛 값을 보이지 않게.
+if (( TMUX_MODE )); then
+    cache="$CACHE_DIR/account-$active_num"
+    [[ -n "$active_num" && -f "$cache" ]] || { echo "ccswitch ?"; exit 0; }
+    read -r f s f_r s_r _ _ fbl < "$cache"
+    read -r f s fbl <<< "$(apply_rollover "${f:-0}" "${s:-0}" "${f_r:-0}" "${s_r:-0}" "${fbl:-}" "$now")"
+    pct() {
+        local v="$1"
+        [[ "$v" =~ ^[0-9]+$ ]] || { printf '?%%'; return; }
+        if (( v >= 100 )); then printf '#[fg=red]%s%%#[fg=default]' "$v"
+        elif (( v >= 80 )); then printf '#[fg=yellow]%s%%#[fg=default]' "$v"
+        else printf '%s%%' "$v"
+        fi
+    }
+    rem() {
+        local r="${1:-0}"
+        [[ "$r" =~ ^[0-9]+$ ]] && (( r > now )) && printf ' %s' "$(fmt_rem $(( r - now )))"
+        return 0
+    }
+    age=$(( now - $(/usr/bin/stat -f %m "$cache" 2>/dev/null || /usr/bin/stat -c %Y "$cache" 2>/dev/null || echo "$now") ))
+    stale=""
+    (( age > 300 )) && stale=" · $(( age / 60 ))분 전"
+    echo "#${active_num} 5h $(pct "$f")$(rem "$f_r") · 7d $(pct "$s")$(rem "$s_r")${stale}"
+    exit 0
+fi
 
 # ============ Menu-bar header (always one line) ============
 if [[ -n "$active_num" && -f "$CACHE_DIR/account-$active_num" ]]; then
