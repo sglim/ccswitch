@@ -152,7 +152,38 @@ if (( TMUX_MODE )); then
     age=$(( now - $(/usr/bin/stat -f %m "$cache" 2>/dev/null || /usr/bin/stat -c %Y "$cache" 2>/dev/null || echo "$now") ))
     stale=""
     (( age > 300 )) && stale=" · $(( age / 60 ))분 전"
-    echo "#${active_num} $(pct "$f")$(rem "$f_r") $(pct "$s")$(rem "$s_r")${total}${stale}"
+
+    # ---- 5시간 사용량 소모 속도(최근 30분) ----
+    # 캐시는 지금 값 하나뿐이라, 캐시가 새로 쓰일 때마다(점검 에이전트가 매분 조회) 계정별 기록에 한 줄 남긴다:
+    #   <캐시 시각> <5시간 %> <5시간 초기화 epoch>   (최근 60줄 ≈ 1시간만 둔다)
+    # 같은 창(초기화 시각이 같은 것) 기록 중 30분 안에서 가장 오래된 것과 지금 값의 기울기 = 시간당 %.
+    # 기록이 10분이 안 되면(계정이 막 바뀜 등) 「–%/h」. 사용률이 정수라 10분에 1% 오르면 6%/h 로 거칠게 잡힌다.
+    # 이 속도로 초기화 전에 100% 에 닿으면 ↑ 와 「고갈 남은 시간」을 테마 빨강으로, 아니면 ↓.
+    mtime=$(( now - age ))
+    hist="$CACHE_DIR/rate-$active_num"
+    if [[ "$f" =~ ^[0-9]+$ && "$f_r" =~ ^[0-9]+$ && "$(tail -n 1 "$hist" 2>/dev/null | cut -d' ' -f1)" != "$mtime" ]]; then
+        { tail -n 59 "$hist" 2>/dev/null; echo "$mtime $f $f_r"; } > "$hist.tmp.$$" && mv "$hist.tmp.$$" "$hist"
+    fi
+    old_t="" old_v=""
+    while read -r t v r; do
+        [[ "$t" =~ ^[0-9]+$ && "$v" =~ ^[0-9]+$ && "$r" =~ ^[0-9]+$ ]] || continue
+        (( mtime - t <= 1800 && r - f_r < 600 && f_r - r < 600 )) || continue
+        old_t=$t old_v=$v
+        break
+    done < <(cat "$hist" 2>/dev/null)
+    speed=" –%/h"
+    if [[ -n "$old_t" ]] && (( mtime - old_t >= 600 )); then
+        span=$(( mtime - old_t )) up=$(( f - old_v ))
+        (( up < 0 )) && up=0
+        rate=$(( (up * 3600 + span / 2) / span ))
+        speed=" ${rate}%/h↓"
+        if (( up > 0 && f < 100 && f_r > now )); then
+            eta=$(( (100 - f) * span / up ))
+            (( eta < f_r - now )) && speed=" ${rate}%/h#[fg=${c_crit}]↑ 고갈 $(fmt_rem "$eta")#[fg=${c_fg}]"
+        fi
+    fi
+
+    echo "#${active_num} $(pct "$f")$(rem "$f_r")${speed} $(pct "$s")$(rem "$s_r")${total}${stale}"
     exit 0
 fi
 
