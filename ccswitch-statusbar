@@ -139,51 +139,74 @@ if (( TMUX_MODE )); then
         [[ "$r" =~ ^[0-9]+$ ]] && (( r > now )) && printf '(%s)' "$(fmt_rem $(( r - now )))"
         return 0
     }
-    sum=0 n=0
+    # 전체 = 모든 계정의 주간 사용률 평균. 계정마다 「번호:주간%:주간초기화」 를 모아 둔다(아래 속도 계산용).
+    sum=0 n=0 cur="" mt_max=0 soon=0
     for num in $(jq -r '.accounts | keys[]' "$SEQUENCE_FILE"); do
-        [[ -f "$CACHE_DIR/account-$num" ]] || continue
-        read -r af as af_r as_r _ _ afbl < "$CACHE_DIR/account-$num"
+        cf="$CACHE_DIR/account-$num"
+        [[ -f "$cf" ]] || continue
+        read -r af as af_r as_r _ _ afbl < "$cf"
         read -r af as afbl <<< "$(apply_rollover "${af:-0}" "${as:-0}" "${af_r:-0}" "${as_r:-0}" "${afbl:-}" "$now")"
         [[ "$as" =~ ^[0-9]+$ ]] || continue
-        sum=$(( sum + as )) n=$(( n + 1 ))
+        [[ "$as_r" =~ ^[0-9]+$ ]] || as_r=0
+        sum=$(( sum + as )) n=$(( n + 1 )) cur="$cur $num:$as:$as_r"
+        m=$(/usr/bin/stat -f %m "$cf" 2>/dev/null || /usr/bin/stat -c %Y "$cf" 2>/dev/null || echo 0)
+        (( m > mt_max )) && mt_max=$m
+        (( as_r > now && (soon == 0 || as_r < soon) )) && soon=$as_r
     done
-    total=""
-    (( n > 0 )) && total=" · 전체 $(pct $(( (sum + n / 2) / n )))"
     age=$(( now - $(/usr/bin/stat -f %m "$cache" 2>/dev/null || /usr/bin/stat -c %Y "$cache" 2>/dev/null || echo "$now") ))
     stale=""
     (( age > 300 )) && stale=" · $(( age / 60 ))분 전"
 
-    # ---- 5시간 사용량 소모 속도(최근 30분) ----
-    # 캐시는 지금 값 하나뿐이라, 캐시가 새로 쓰일 때마다(점검 에이전트가 매분 조회) 계정별 기록에 한 줄 남긴다:
-    #   <캐시 시각> <5시간 %> <5시간 초기화 epoch>   (최근 60줄 ≈ 1시간만 둔다)
-    # 같은 창(초기화 시각이 같은 것) 기록 중 30분 안에서 가장 오래된 것과 지금 값의 기울기 = 시간당 %.
-    # 기록이 10분이 안 되면(계정이 막 바뀜 등) 「–%/h」. 사용률이 정수라 10분에 1% 오르면 6%/h 로 거칠게 잡힌다.
-    # 이 속도로 초기화 전에 100% 에 닿으면 ↑ 와 「고갈 남은 시간」을 테마 빨강으로, 아니면 ↓.
-    mtime=$(( now - age ))
-    hist="$CACHE_DIR/rate-$active_num"
-    if [[ "$f" =~ ^[0-9]+$ && "$f_r" =~ ^[0-9]+$ && "$(tail -n 1 "$hist" 2>/dev/null | cut -d' ' -f1)" != "$mtime" ]]; then
-        { tail -n 59 "$hist" 2>/dev/null; echo "$mtime $f $f_r"; } > "$hist.tmp.$$" && mv "$hist.tmp.$$" "$hist"
-    fi
-    old_t="" old_v=""
-    while read -r t v r; do
-        [[ "$t" =~ ^[0-9]+$ && "$v" =~ ^[0-9]+$ && "$r" =~ ^[0-9]+$ ]] || continue
-        (( mtime - t <= 1800 && r - f_r < 600 && f_r - r < 600 )) || continue
-        old_t=$t old_v=$v
-        break
-    done < <(cat "$hist" 2>/dev/null)
-    speed=" –%/h"
-    if [[ -n "$old_t" ]] && (( mtime - old_t >= 600 )); then
-        span=$(( mtime - old_t )) up=$(( f - old_v ))
-        (( up < 0 )) && up=0
-        rate=$(( (up * 3600 + span / 2) / span ))
-        speed=" ${rate}%/h↓"
-        if (( up > 0 && f < 100 && f_r > now )); then
-            eta=$(( (100 - f) * span / up ))
-            (( eta < f_r - now )) && speed=" ${rate}%/h#[fg=${c_crit}]↑ 고갈 $(fmt_rem "$eta")#[fg=${c_fg}]"
+    # ---- 전체 소모 속도(최근 30분)와 고갈 예상 ----
+    # 캐시는 계정마다 지금 값 하나뿐이라, 어느 계정 캐시든 새로 쓰일 때마다 기록(rate-all)에 한 줄 남긴다:
+    #   <가장 최근 캐시 시각> <번호:주간%:주간초기화> ...   (최근 60줄만 둔다)
+    # 30분 안에서 가장 오래된 줄과 지금을 계정별로 견줘 오른 만큼만 더한다 — 같은 주간 창(초기화 시각이 같은 것)끼리만,
+    # 그래서 어느 계정이 초기화돼 0% 로 떨어져도 속도가 꺾이지 않는다. 합 ÷ 계정 수 = 「전체」 가 오른 만큼.
+    # 기록이 10분이 안 되면 「–%/h」. 지금 계정은 매분, 나머지는 점검이 전체를 조회할 때(매시)만 갱신돼 값이 계단처럼 튄다.
+    # 고갈 = 이 속도로 모든 계정의 주간 한도가 다 차기까지. 그게 가장 빠른 주간 초기화보다 먼저면(쓸 계정이 하나도
+    # 없는 때가 온다) ↑ 와 테마 빨강, 아니면 ↓.
+    speed=""
+    if (( n > 0 && mt_max > 0 )); then
+        hist="$CACHE_DIR/rate-all"
+        if [[ "$(tail -n 1 "$hist" 2>/dev/null | cut -d' ' -f1)" != "$mt_max" ]]; then
+            { tail -n 59 "$hist" 2>/dev/null; echo "${mt_max}${cur}"; } > "$hist.tmp.$$" && mv "$hist.tmp.$$" "$hist"
+        fi
+        old=""
+        while read -r t rest; do
+            [[ "$t" =~ ^[0-9]+$ ]] || continue
+            (( mt_max - t <= 1800 )) || continue
+            old="$t $rest"
+            break
+        done < <(cat "$hist" 2>/dev/null)
+        speed=" –%/h"
+        read -r old_t old_rest <<< "$old"
+        if [[ -n "$old_t" ]] && (( mt_max - old_t >= 600 )); then
+            span=$(( mt_max - old_t )) up=0
+            for o in $old_rest; do
+                IFS=: read -r on ov or <<< "$o"
+                for c in $cur; do
+                    IFS=: read -r cn cv cr <<< "$c"
+                    [[ "$cn" == "$on" ]] || continue
+                    (( cr - or < 600 && or - cr < 600 && cv > ov )) && up=$(( up + cv - ov ))
+                done
+            done
+            # 전체 %/h, 소수 한 자리: up/n % 가 span 초 동안 올랐다.
+            r10=$(( (up * 36000 * 2 + span * n) / (2 * span * n) ))
+            speed=" $(( r10 / 10 )).$(( r10 % 10 ))%/h↓"
+            if (( up > 0 && sum < n * 100 )); then
+                eta=$(( (n * 100 - sum) * span / up ))
+                if (( soon > now && eta < soon - now )); then
+                    speed=" $(( r10 / 10 )).$(( r10 % 10 ))%/h#[fg=${c_crit}]↑ 고갈 $(fmt_rem "$eta")#[fg=${c_fg}]"
+                else
+                    speed=" $(( r10 / 10 )).$(( r10 % 10 ))%/h↓ 고갈 $(fmt_rem "$eta")"
+                fi
+            fi
         fi
     fi
+    total=""
+    (( n > 0 )) && total=" · 전체 $(pct $(( (sum + n / 2) / n )))${speed}"
 
-    echo "#${active_num} $(pct "$f")$(rem "$f_r")${speed} $(pct "$s")$(rem "$s_r")${total}${stale}"
+    echo "#${active_num} $(pct "$f")$(rem "$f_r") $(pct "$s")$(rem "$s_r")${total}${stale}"
     exit 0
 fi
 
