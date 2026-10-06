@@ -2616,6 +2616,27 @@ perform_switch() {
 # 비용: 계정마다 Haiku 호출 한 번("ok"). 그 계정의 5h 창이 시작된다.
 # 제외: 풀이 지금 쓰는 계정(Claude Code 가 관리), 백업 없는 계정, 아직 10분 이상
 # 유효한 토큰. 인자로 번호를 주면 그 계정만.
+# 캐시 기준으로 지금 포화인가(5h 또는 7d 가 100%). 리셋 시각이 지났으면
+# 그 창은 이미 롤오버된 것이므로 0 으로 본다 — gather_all_usage 의 보정과 같은 규칙.
+# --refresh 가 이걸 보는 이유: 포화 계정에 `claude -p` 를 쏘면 통과하지 못하는 게
+# 아니라 **extra usage(MTD) 크레딧으로 과금**될 수 있다. 토큰을 되살리자고 돈을
+# 쓸 이유는 없다. 리셋되면 그때 깨우면 된다.
+cache_saturated() {
+    local n="$1" f five seven five_reset seven_reset now
+    f="$USAGE_CACHE_DIR/account-$n"
+    [[ -f "$f" ]] || return 1
+    five=$(awk '{print $1}' "$f" 2>/dev/null)
+    seven=$(awk '{print $2}' "$f" 2>/dev/null)
+    five_reset=$(awk '{print $3}' "$f" 2>/dev/null)
+    seven_reset=$(awk '{print $4}' "$f" 2>/dev/null)
+    now=$(date +%s)
+    [[ "$five_reset" =~ ^[0-9]+$ ]] && (( five_reset > 0 && five_reset <= now )) && five=0
+    [[ "$seven_reset" =~ ^[0-9]+$ ]] && (( seven_reset > 0 && seven_reset <= now )) && seven=0
+    [[ "$five" =~ ^[0-9]+$ ]] && (( five >= 100 )) && return 0
+    [[ "$seven" =~ ^[0-9]+$ ]] && (( seven >= 100 )) && return 0
+    return 1
+}
+
 cmd_refresh() {
     [[ -f "$SEQUENCE_FILE" ]] || { echo "Error: No accounts are managed yet"; exit 1; }
     local bin now_ms targets=() active=" " p n
@@ -2663,6 +2684,10 @@ cmd_refresh() {
         old_exp=$(jq -r '.claudeAiOauth.expiresAt // 0' <<<"$creds" 2>/dev/null || echo 0)
         if (( old_exp > now_ms + 600000 )); then
             echo "  Account-$n  아직 유효 — 건너뜀"; skip=$((skip+1)); continue
+        fi
+        if cache_saturated "$n"; then
+            echo "  Account-$n  포화(캐시 기준 5h/7d 100%) — 건너뜀 (깨우면 MTD 과금)"
+            skip=$((skip+1)); continue
         fi
         uuid=$(jq -r --arg n "$n" '.accounts[$n].uuid // ""' "$SEQUENCE_FILE")
         org=$(jq -r --arg n "$n" '.accounts[$n].organizationUuid // ""' "$SEQUENCE_FILE")
