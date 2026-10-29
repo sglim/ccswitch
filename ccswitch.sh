@@ -2246,10 +2246,47 @@ sweep_minute() {
     echo $(( 10#$m % 60 ))
 }
 
+# 자동 갱신 대상: access token 이 10분 안에 만료(또는 이미 만료)되고 refresh token 은
+# 살아 있는, 어느 풀도 쓰지 않는 계정 번호. refresh 가 죽은 계정은 doctor 로 살릴 수
+# 없으므로 빼야 매시 헛도는 호출이 안 생김. refreshTokenExpiresAt 이 없는 옛 자격증명은 시도.
+auto_refresh_targets() {
+    local active=" " p n email cred access_ms refresh_ms now_ms
+    for p in $(pool_names); do
+        n=$(pool_current_account "$p" 2>/dev/null || true)
+        [[ -n "$n" ]] && active+="$n "
+    done
+    # 지금 쓰는 계정을 모르면 건드리지 않음 — cmd_refresh 와 같은 규칙.
+    [[ "$active" == " " ]] && return 0
+    now_ms=$(( $(date +%s) * 1000 ))
+    for n in $(jq -r '.accounts | keys | map(tonumber) | sort | .[]' "$SEQUENCE_FILE"); do
+        [[ "$active" == *" $n "* ]] && continue
+        email=$(jq -r --arg n "$n" '.accounts[$n].email // ""' "$SEQUENCE_FILE")
+        [[ -n "$email" ]] || continue
+        cred=$(read_account_credentials "$n" "$email")
+        [[ -n "${cred//[[:space:]]/}" ]] || continue
+        access_ms=$(creds_expires_at "$cred")
+        (( access_ms > now_ms + 600000 )) && continue
+        refresh_ms=$(jq -r '.claudeAiOauth.refreshTokenExpiresAt // 0' <<<"$cred" 2>/dev/null || echo 0)
+        [[ "$refresh_ms" =~ ^[0-9]+$ ]] || refresh_ms=0
+        (( refresh_ms > 0 && refresh_ms <= now_ms )) && continue
+        echo "$n"
+    done
+}
+
 # 모든 풀을 차례로 한 번씩 tick 한다(풀마다 서브셸 — POOL 과 exit 이 서로 새지 않게).
+# 매시 sweep 분에는 그 전에 만료된 백업 토큰을 갱신 — sweep 이 캐시 추정치 대신
+# 실측으로 고르게. CCSWITCH_AUTO_REFRESH=0 이면 끔.
 cmd_tick() {
     [[ -f "$SEQUENCE_FILE" ]] || return 0
-    local p
+    local p targets
+    if [[ "${CCSWITCH_AUTO_REFRESH:-1}" != 0 ]] && (( 10#$(date +%M) == $(sweep_minute) )); then
+        targets=$(auto_refresh_targets)
+        if [[ -n "$targets" ]]; then
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] Auto-refresh: Account $(echo $targets | tr ' ' ',')"
+            # cmd_refresh 의 exit·trap EXIT 가 tick 을 끝내지 않게 서브셸로.
+            ( cmd_refresh $targets ) || true
+        fi
+    fi
     for p in $(pool_names); do
         ( POOL="$p"; cmd_tick_pool ) || true
     done
@@ -2941,21 +2978,25 @@ perform_switch() {
 #
 # ccswitch 는 토큰을 직접 갱신하지 않는다 — 갱신 규칙을 흉내 내다 틀리면 계정이
 # 날아간다. 대신 계정마다 임시 설정 폴더(CLAUDE_CONFIG_DIR)에 백업 토큰을 넣고
-# `claude -p` 를 한 번 돌려, Claude Code 가 스스로 갱신하게 한다. 지금 쓰는 세션
+# `claude doctor` 를 한 번 돌려, Claude Code 가 스스로 갱신하게 한다. 지금 쓰는 세션
 # (~/.claude)은 건드리지 않는다.
+#
+# doctor 는 계정·정책 API 를 조회하면서 토큰을 갱신하고 모델은 부르지 않음 — 5h 창도
+# MTD 과금도 없음(Claude Code 2.1.312 실측). 문서화된 동작이 아니라 버전이 바뀌면
+# 사라질 수 있음 — 그때는 「토큰이 갱신되지 않음」 실패로 드러남(조용히 틀리지 않음).
+# 터칭 모드는 5h 창 시작이 목적이라 `claude -p` 로 모델 호출.
 #
 # 갱신된 토큰은 프로필 API 로 그 계정 본인 것인지·더 새것인지 확인한 뒤에만 백업
 # 칸에 쓰고, 임시 폴더와 그 키체인 항목은 바로 지운다(같은 토큰을 두 곳에 두면 한쪽
 # 갱신이 다른 쪽을 무효로 만든다).
 #
-# 비용: 계정마다 Haiku 호출 한 번("ok"). 그 계정의 5h 창이 시작된다.
+# 비용: 일반 모드는 없음. 터칭 모드는 계정마다 Haiku 호출 한 번("ok")으로 5h 창 시작.
 # 제외: 풀이 지금 쓰는 계정(Claude Code 가 관리), 백업 없는 계정, 아직 10분 이상
-# 유효한 토큰. 인자로 번호를 주면 그 계정만.
+# 유효한 토큰(터칭 모드 제외). 인자로 번호를 주면 그 계정만.
 # 캐시 기준으로 지금 포화인가(5h 또는 7d 가 100%). 리셋 시각이 지났으면
 # 그 창은 이미 롤오버된 것이므로 0 으로 본다 — gather_all_usage 의 보정과 같은 규칙.
-# --refresh 가 이걸 보는 이유: 포화 계정에 `claude -p` 를 쏘면 통과하지 못하는 게
-# 아니라 **extra usage(MTD) 크레딧으로 과금**될 수 있다. 토큰을 되살리자고 돈을
-# 쓸 이유는 없다. 리셋되면 그때 깨우면 된다.
+# 터칭 모드가 이걸 보는 이유: 포화 계정에 `claude -p` 를 쏘면 통과하지 못하는 게
+# 아니라 **extra usage(MTD) 크레딧으로 과금**될 수 있다. 리셋되면 그때 깨우면 된다.
 cache_saturated() {
     local n="$1" f five seven five_reset seven_reset now
     f="$USAGE_CACHE_DIR/account-$n"
@@ -3022,7 +3063,7 @@ cmd_refresh() {
         if [[ "${CCSWITCH_REFRESH_TOUCH:-0}" != 1 ]] && (( old_exp > now_ms + 600000 )); then
             echo "  Account-$n  아직 유효 — 건너뜀"; skip=$((skip+1)); continue
         fi
-        if cache_saturated "$n"; then
+        if [[ "${CCSWITCH_REFRESH_TOUCH:-0}" == 1 ]] && cache_saturated "$n"; then
             echo "  Account-$n  포화(캐시 기준 5h/7d 100%) — 건너뜀 (깨우면 MTD 과금)"
             skip=$((skip+1)); continue
         fi
@@ -3041,11 +3082,11 @@ cmd_refresh() {
         fi
         # 실패(갱신 불가 등)해도 set -e 로 스크립트가 죽지 않게 rc 를 따로 받는다.
         rc=0
-        # 터칭은 tick 안에서 돌아 그동안 긴급 판정이 밀리므로 짧게 끊는다.
-        local tmo=90
-        [[ "${CCSWITCH_REFRESH_TOUCH:-0}" == 1 ]] && tmo=30
+        # tick 안에서도 돌아 그동안 긴급 판정이 밀리므로 짧게 끊는다(doctor 단독 실측 약 0.7초).
+        local tmo=30 run=(doctor)
+        [[ "${CCSWITCH_REFRESH_TOUCH:-0}" == 1 ]] && run=(-p --model haiku "ok")
         out=$(cd "$D" && perl -e 'alarm shift; exec @ARGV' "$tmo" \
-            env CLAUDE_CONFIG_DIR="$D" "$bin" -p --model haiku "ok" </dev/null 2>&1) || rc=$?
+            env CLAUDE_CONFIG_DIR="$D" "$bin" "${run[@]}" </dev/null 2>&1) || rc=$?
         new=$(security find-generic-password -s "$svc" -a "$USER" -w 2>/dev/null || true)
         [[ -z "$new" && -f "$D/.credentials.json" ]] && new=$(cat "$D/.credentials.json")
         security delete-generic-password -s "$svc" -a "$USER" >/dev/null 2>&1 || true
@@ -3799,7 +3840,7 @@ show_usage() {
     echo "  --fable-priority [on|off]                  Prefer accounts with Fable quota left (default: off; no arg = show status)"
     echo "  --set-fable-handicap <num> <percent>       Per-account Fable handicap (0-100); 100 = use that account's Fable last"
     echo "  --sync-current                             Refresh current account's backup from live state"
-    echo "  --refresh [num...]                         만료된 백업 토큰을 claude -p 로 갱신 (지금 쓰는 계정 제외, 계정당 Haiku 1회)"
+    echo "  --refresh [num...]                         만료된 백업 토큰을 claude doctor 로 갱신 (지금 쓰는 계정 제외, 모델 호출 없음)"
     echo "  --agent-install                            Install/update the macOS LaunchAgent (recommended on macOS)"
     echo "  --agent-status                             Show LaunchAgent state (launchctl print)"
     echo "  --agent-kick                               Trigger the LaunchAgent now (launchctl kickstart)"
