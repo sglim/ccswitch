@@ -102,10 +102,10 @@ Next target: Account-3 (cold-warmup — 5h window untouched)
 | `--why <명령>` | picker 판단 근거를 stderr 로 출력 (예: `--why --show-usage`). **LLM·API 호출 없음** — 이미 계산된 값을 찍기만 하므로 결과가 달라지지 않고 비용·지연도 0 |
 | `--fable-priority [on\|off]` | **Fable 우선 모드** 토글 (기본 off). 인자 없이 실행하면 현재 상태 표시 |
 | `--set-fable-handicap <num> <pct>` | 계정별 **Fable handicap** (0–100). 100 = 그 계정 Fable 을 가장 마지막에 사용 |
-| `--refresh [num...]` | 만료된 백업 토큰을 `claude -p` 로 갱신해 사용량을 다시 볼 수 있게 한다. 지금 쓰는 계정은 제외. 계정마다 Haiku 호출 1번(그 계정의 5h 창이 시작됨). 이미 죽은 토큰은 재로그인 안내 |
+| `--refresh [num...]` | 만료된 백업 토큰을 `claude doctor` 로 갱신해 사용량을 다시 볼 수 있게 한다. 지금 쓰는 계정은 제외. 모델을 부르지 않아 5h 창·과금 없음. 이미 죽은 토큰은 재로그인 안내. `--tick` 이 매시 sweep 1분 전에 자동으로도 돌린다 |
 | `--sync-current` | 현재 계정 백업을 live 키체인/config 로 새로고침 |
 | `--agent-install` | macOS LaunchAgent 설치 (매분 `--tick`) |
-| `--tick` | LaunchAgent 용 1분 tick: ①현재 계정 100% 포화 시 즉시 전환 ②다른 계정의 7d 주간한도가 방금 리셋되면 그 계정으로 즉시 전환 ③매시 한 번 정기 switch-lowest (분은 호스트 이름 해시로 PC 마다 다름, `CCSWITCH_SWEEP_MINUTE=0..59` 로 고정). 그 외엔 no-op |
+| `--tick` | LaunchAgent 용 1분 tick: ①현재 계정 100% 포화 시 즉시 전환 ②다른 계정의 7d 주간한도가 방금 리셋되면 그 계정으로 즉시 전환 ③매시 sweep 1분 전에 만료된 백업 토큰 자동 갱신(`--refresh`, 긴급 판정 뒤에 최대 `CCSWITCH_AUTO_REFRESH_BUDGET`초(기본 25), `CCSWITCH_AUTO_REFRESH=0` 이면 끔) ④매시 한 번 정기 switch-lowest (분은 호스트 이름 해시로 PC 마다 다름, `CCSWITCH_SWEEP_MINUTE=0..59` 로 고정). 그 외엔 no-op |
 | `--agent-status` | `launchctl print` 으로 agent 상태 |
 | `--agent-kick` | agent 즉시 트리거 (`launchctl kickstart`) |
 | `--agent-remove` | LaunchAgent 제거 (`~/.claude-switch-backup` 보존) |
@@ -282,7 +282,7 @@ rm -rf ~/.claude-switch-backup
 
 ## 문제 해결
 
-**"accessToken expired; skipping"** — 해당 계정의 OAuth 토큰 만료. ccswitch 는 토큰 refresh 를 직접 수행하지 않습니다. 그 계정으로 한 번 switch 하면 Claude Code 가 다음 호출 시 refresh 합니다. picker 의 `stale` tier 가 정확히 이런 만료 계정을 우선 선택하도록 설계됨.
+**"accessToken expired; skipping"** — 해당 계정의 OAuth 토큰 만료. 쉬는 계정은 약 8시간이면 이 상태가 된다. LaunchAgent 가 켜져 있으면 매시 sweep 1분 전에 `--refresh` 가 자동으로 갱신하고, 바로 보려면 `ccswitch.sh --refresh <num>`. ccswitch 는 토큰 refresh 를 직접 수행하지 않고 Claude Code(`claude doctor`)에게 맡긴다. 갱신이 「refresh 토큰이 이미 죽음」 으로 실패하면 macOS 알림이 한 번 뜬다 — 그 계정으로 `/login` 후 `--add-account`.
 
 **「Claude Code 로그인 만료」 알림** — 백업 칸의 refresh token 이 만료된 계정(`--list` 에 `refresh 만료` 로 표시). access token 만료와 달리 전환이나 `--refresh` 로는 되살아나지 않는다. 그 계정으로 `/login` 한 뒤 `ccswitch.sh --add-account`. 사용량을 조회할 때(`--show-usage`·TUI·tick) 판정하며, 풀이 지금 쓰는 계정은 제외, 같은 토큰은 한 번만 알린다. 만료 시각 전에 무효가 된 토큰(다른 곳에서 회전·로그아웃)은 알 수 없다. 알림 권한이 없으면 표시되지 않는다.
 
