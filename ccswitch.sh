@@ -358,22 +358,30 @@ notify_refresh_expired() {
     notify_relogin_needed "$num" "$email" "$cred" "만료되었습니다"
 }
 
+refresh_token_hash() {
+    jq -r '.claudeAiOauth.refreshToken // ""' <<<"$1" 2>/dev/null | shasum -a 256 | cut -c1-64
+}
+
+# 계정 칸의 이 refresh token 이 이미 죽은 것으로 기록됐나(만료 또는 갱신 거절로 알림한 토큰).
+refresh_token_marked_dead() {
+    local marker="$BACKUP_DIR/expiry-notified/account-$1"
+    [[ -f "$marker" && "$(cat "$marker" 2>/dev/null)" == "$(refresh_token_hash "$2")" ]]
+}
+
 # 재로그인이 필요한 계정을 macOS 알림으로 한 번 알림. $4 = 「로그인(refresh token)이 ___」 의 서술.
 notify_relogin_needed() {
     local num="$1" email="$2" cred="$3" what="$4"
-    command -v terminal-notifier >/dev/null 2>&1 || command -v osascript >/dev/null 2>&1 || return 0
 
     # 같은 refresh token 은 한 번만 — 재로그인으로 토큰이 바뀌면 다시 알림 대상.
-    # 전송이 실패해도 기록은 남김: LaunchAgent 처럼 알림 권한이 없는 곳에서 매분 재시도하지 않게.
+    # 전송이 실패하거나 알림 수단이 없어도 기록은 남김: 알림 권한이 없는 LaunchAgent 가 매분
+    # 재시도하지 않게, auto_refresh_targets 가 죽은 토큰을 매시 다시 고르지 않게.
     # 원문 토큰은 저장하지 않음.
-    local hash marker_dir marker
-    hash=$(jq -r '.claudeAiOauth.refreshToken // ""' <<<"$cred" 2>/dev/null | shasum -a 256 | cut -c1-64) || return 0
-    marker_dir="$BACKUP_DIR/expiry-notified"
-    marker="$marker_dir/account-$num"
-    [[ -f "$marker" && "$(cat "$marker" 2>/dev/null)" == "$hash" ]] && return 0
-    mkdir -p "$marker_dir" && printf '%s\n' "$hash" > "$marker" || return 0
+    refresh_token_marked_dead "$num" "$cred" && return 0
+    local marker_dir="$BACKUP_DIR/expiry-notified"
+    mkdir -p "$marker_dir" && refresh_token_hash "$cred" > "$marker_dir/account-$num" || return 0
+    command -v terminal-notifier >/dev/null 2>&1 || command -v osascript >/dev/null 2>&1 || return 0
 
-    local org_name org_uuid label msg title="Claude Code 로그인 만료"
+    local org_name org_uuid label msg title="Claude Code 재로그인 필요"
     org_name=$(jq -r --arg n "$num" '.accounts[$n].organizationName // ""' "$SEQUENCE_FILE" 2>/dev/null) || org_name=""
     org_uuid=$(jq -r --arg n "$num" '.accounts[$n].organizationUuid // ""' "$SEQUENCE_FILE" 2>/dev/null) || org_uuid=""
     label="Account-$num $email"
@@ -2271,7 +2279,8 @@ sweep_minute() {
 
 # 자동 갱신 대상: access token 이 10분 안에 만료(또는 이미 만료)되고 refresh token 은
 # 살아 있는, 어느 풀도 쓰지 않는 계정 번호. refresh 가 죽은 계정은 doctor 로 살릴 수
-# 없으므로 빼야 매시 헛도는 호출이 안 생김. refreshTokenExpiresAt 이 없는 옛 자격증명은 시도.
+# 없으므로 빼야 매시 헛도는 호출이 안 생김 — 만료 시각이 지났거나, 갱신이 거절돼
+# 알림 기록(refresh_token_marked_dead)이 남은 토큰. refreshTokenExpiresAt 이 없는 옛 자격증명은 시도.
 auto_refresh_targets() {
     local active n email cred access_ms refresh_ms now_ms
     active=$(pool_active_accounts)
@@ -2288,6 +2297,7 @@ auto_refresh_targets() {
         (( access_ms > now_ms + 600000 )) && continue
         refresh_ms=$(creds_refresh_expires_at "$cred")
         (( refresh_ms > 0 && refresh_ms <= now_ms )) && continue
+        refresh_token_marked_dead "$n" "$cred" && continue
         echo "$n"
     done
 }
@@ -3154,7 +3164,14 @@ cmd_refresh() {
             ok=$((ok+1))
         else
             first=$( { echo "$out" | grep -v '^Warning: no stdin' || true; } | head -1 | cut -c1-70 )
-            if [[ "$out" == *"could not be refreshed"* || "$out" == *"/login"* ]]; then
+            # doctor 는 refresh 가 거절되면 아무 문구 없이 rc=0 으로 끝나고 자격증명의 토큰을
+            # 빈 문자열로 비움(2.1.314 실측). 타임아웃·doctor 동작 변경으로 갱신을 못 한
+            # 경우는 토큰이 원래 값 그대로 남아 이것과 구별됨.
+            if [[ -n "${new//[[:space:]]/}" && -z "$(jq -r '.claudeAiOauth.refreshToken // ""' <<<"$new" 2>/dev/null)" ]]; then
+                reason="refresh 토큰이 이미 죽음(Claude Code 가 자격증명을 비움) — 이 계정으로 /login 후 --add-account 필요"
+                first=""
+                notify_relogin_needed "$n" "$email" "$creds" "무효화되었습니다"
+            elif [[ "$out" == *"could not be refreshed"* || "$out" == *"/login"* ]]; then
                 reason="refresh 토큰이 이미 죽음 — 이 계정으로 /login 후 --add-account 필요"
                 # 알림은 확실한 문구에만 — 「/login」 은 다른 안내문에도 나올 수 있음.
                 if [[ "$out" == *"could not be refreshed"* ]]; then
