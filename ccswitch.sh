@@ -97,12 +97,40 @@ why_acct() {
 # (cache_saturated 는 MTD 과금 회피용이라 실제 100% 기준을 그대로 쓴다.)
 readonly EMERGENCY_FIVE="${CCSWITCH_EMERGENCY_FIVE:-99}"
 readonly EMERGENCY_SEVEN="${CCSWITCH_EMERGENCY_SEVEN:-100}"
+# 전부 포화라 긴급 전환이 지금 계정에 머물렀으면, 이만큼은 매분 전 계정 조회를 다시 하지 않는다.
+readonly EMERGENCY_HOLD_SECONDS=600
 
 is_saturated() {
     local five="$1" seven="$2"
     [[ "$five" =~ ^[0-9]+$ ]] && (( five >= EMERGENCY_FIVE )) && return 0
     [[ "$seven" =~ ^[0-9]+$ ]] && (( seven >= EMERGENCY_SEVEN )) && return 0
     return 1
+}
+
+# 포화 계정을 다시 쓸 수 있을 때까지 남은 초. is_saturated 와 같은 기준으로 막힌
+# 창마다 리셋까지 남은 시간을 보고, 둘 다 막혔으면 늦은 쪽. 리셋 시각을 모르면
+# (rem 0·빈 값) 999999999 — 아는 계정에 항상 진다.
+saturated_back_in() {
+    local five="$1" five_rem="$2" seven="$3" seven_rem="$4" back=0 r
+    if [[ "$five" =~ ^[0-9]+$ ]] && (( five >= EMERGENCY_FIVE )); then
+        r="$five_rem"; [[ "$r" =~ ^[0-9]+$ ]] && (( r > 0 )) || r=999999999
+        (( r > back )) && back=$r
+    fi
+    if [[ "$seven" =~ ^[0-9]+$ ]] && (( seven >= EMERGENCY_SEVEN )); then
+        r="$seven_rem"; [[ "$r" =~ ^[0-9]+$ ]] && (( r > 0 )) || r=999999999
+        (( r > back )) && back=$r
+    fi
+    echo "$back"
+}
+
+# saturated_back_in 의 초 → "1d4h" / "3h12m" / "25m" / "?"(모름).
+format_back_in() {
+    local s="$1"
+    if (( s >= 999999999 )); then echo "?"
+    elif (( s >= 86400 )); then echo "$(( s / 86400 ))d$(( s % 86400 / 3600 ))h"
+    elif (( s >= 3600 )); then echo "$(( s / 3600 ))h$(( s % 3600 / 60 ))m"
+    else echo "$(( s / 60 ))m"
+    fi
 }
 
 is_cold_candidate() {
@@ -1090,7 +1118,11 @@ fetch_account_utilization() {
     response=$(/bin/cat "$body_file")
     /bin/rm -f "$body_file" "$hdrs_file"
 
-    if ! echo "$response" | jq -e '.five_hour.utilization' >/dev/null 2>&1; then
+    # 5h 창이 열려 있지 않으면(그동안 안 썼거나 7d 가 막혀 못 쓴 계정) API 는
+    # "five_hour": null 을 준다 — 5h 0 이고 7d 는 실측이다. 예전엔 이것을 이상한
+    # 응답으로 버려, 실제 7d 100% 인 계정이 이틀 전 캐시(48%)로 남아 picker 가
+    # 꽉 찬 계정으로 옮겼다(2026-10-31, 8번). 키가 아예 없으면 오류 응답이다.
+    if ! echo "$response" | jq -e 'has("five_hour") and (.five_hour == null or (.five_hour.utilization | type) == "number")' >/dev/null 2>&1; then
         echo "  [Account-$account_num $email] unexpected usage API response" >&2
         return 1
     fi
@@ -1452,7 +1484,8 @@ render_usage_table() {
 #      for overage on a maxed-with-extra account before dipping into
 #      this slot. Only picked when no ext capacity is available.
 #   6) maxed-no-extra (some window at 100% AND no extra usage) — last
-#      resort before blocked-handicap.
+#      resort before blocked-handicap. 가장 빨리 다시 쓸 수 있는(막힌 창이
+#      모두 풀리는) 계정을 고른다 — saturated_back_in.
 #   7) blocked-handicap (handicap>0 AND adjusted>=100) — handicap
 #      treats the account as if it were maxed regardless of available
 #      extra capacity. Picked only if every other tier is empty so a
@@ -1473,7 +1506,7 @@ pick_from_usage_data() {
     # candidate so we can still fall back when current is the only one.
     local maxed_extra_num="" maxed_extra_eu="" maxed_extra_adj=""
     local maxed_extra_alt_num="" maxed_extra_alt_eu="" maxed_extra_alt_adj=""
-    local maxed_noextra_num="" maxed_noextra_score="" maxed_noextra_rem=""
+    local maxed_noextra_num="" maxed_noextra_score="" maxed_noextra_back=""
     local blocked_num="" blocked_score=""
     local num email five seven handicap adjusted status five_rem seven_rem has_extra extra_util fable fable_hc
     # Fable 우선 선택용 수집기. healthy tier 안에서 "Fable 여유 있는 계정" 을
@@ -1659,13 +1692,16 @@ pick_from_usage_data() {
                 fi
             fi
         else
-            why_acct "$num" "maxed-no-extra: 포화 + extra-usage 없음 (최후 수단)"
-            if [[ -z "$maxed_noextra_num" ]]; then
-                maxed_noextra_num="$num"; maxed_noextra_score="$adjusted"; maxed_noextra_rem="$seven_rem_norm"
-            elif (( adjusted < maxed_noextra_score )); then
-                maxed_noextra_num="$num"; maxed_noextra_score="$adjusted"; maxed_noextra_rem="$seven_rem_norm"
-            elif (( adjusted == maxed_noextra_score && seven_rem_norm < maxed_noextra_rem )); then
-                maxed_noextra_num="$num"; maxed_noextra_score="$adjusted"; maxed_noextra_rem="$seven_rem_norm"
+            # 전부 막혔으면 가장 빨리 다시 쓸 수 있는 계정에 가 있는다 — 풀리는 순간
+            # 전환·재시작 없이 바로 쓴다. 다시 쓸 수 있는 시각 = 막힌 창들이 모두
+            # 풀리는 시각(둘 다 막혔으면 늦은 쪽). 모르면 맨 뒤. 동률이면 adjusted.
+            local back
+            back=$(saturated_back_in "$five" "$five_rem" "$seven" "$seven_rem")
+            why_acct "$num" "maxed-no-extra: 포화 + extra-usage 없음, $(format_back_in "$back") 뒤 풀림"
+            if [[ -z "$maxed_noextra_num" ]] \
+               || (( back < maxed_noextra_back )) \
+               || (( back == maxed_noextra_back && adjusted < maxed_noextra_score )); then
+                maxed_noextra_num="$num"; maxed_noextra_score="$adjusted"; maxed_noextra_back="$back"
             fi
         fi
     done
@@ -1698,7 +1734,7 @@ pick_from_usage_data() {
         why "→ 선택: Account-$maxed_extra_num (tier=maxed-extra)"
         echo "$maxed_extra_num"
     elif [[ -n "$maxed_noextra_num" ]]; then
-        why "→ 선택: Account-$maxed_noextra_num (tier=maxed-no-extra — 최후 수단)"
+        why "→ 선택: Account-$maxed_noextra_num (tier=maxed-no-extra — 전부 포화, $(format_back_in "$maxed_noextra_back") 뒤 가장 먼저 풀림)"
         echo "$maxed_noextra_num"
     else
         echo "$blocked_num"
@@ -2153,6 +2189,22 @@ cmd_tick() {
     done
 }
 
+# 긴급 전환 보류 표식(풀마다): "<계정> <epoch>". 긴급 조회 뒤에도 그 계정에 머물렀을
+# 때(옮길 곳 없음) 남긴다.
+emergency_hold_file() {
+    echo "$BACKUP_DIR/emergency-hold-${POOL:-default}"
+}
+
+# 계정 N 이 긴급 전환 보류 중인가 — 같은 계정이고 EMERGENCY_HOLD_SECONDS 안.
+emergency_on_hold() {
+    local f acct at
+    f=$(emergency_hold_file)
+    [[ -f "$f" ]] || return 1
+    read -r acct at < "$f" || return 1
+    [[ "$acct" == "$1" && "$at" =~ ^[0-9]+$ ]] || return 1
+    (( $(date +%s) - at < EMERGENCY_HOLD_SECONDS ))
+}
+
 cmd_tick_pool() {
     [[ -f "$SEQUENCE_FILE" ]] || return 0
 
@@ -2168,9 +2220,15 @@ cmd_tick_pool() {
             seven=$(echo "$util" | awk '{print $2}')
             [[ "$five" =~ ^[0-9]+$ ]] || five=0
             [[ "$seven" =~ ^[0-9]+$ ]] || seven=0
-            if is_saturated "$five" "$seven"; then
+            # 직전 긴급 조회에서 이 계정이 이미 가장 나은 자리였으면(전부 포화) 보류 동안은
+            # 다시 묻지 않는다 — 매분 전 계정 조회(429 위험)가 된다. 리셋은 아래 7d fast
+            # path(캐시만 봄)와 정기 sweep 이 잡는다.
+            if is_saturated "$five" "$seven" && ! emergency_on_hold "$current"; then
                 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Emergency: Account-$current saturated (5h=${five}% 7d=${seven}%) — switching now."
                 CCSWITCH_HYSTERESIS_DELTA=0 cmd_switch_lowest
+                if [[ "$(identify_current_account)" == "$current" ]]; then
+                    echo "$current $(date +%s)" > "$(emergency_hold_file)"
+                fi
                 return 0
             fi
         fi
@@ -2385,7 +2443,7 @@ cmd_switch_lowest() {
         if [[ "$target_extra" == "true" ]]; then
             echo "Decision: switching to Account-$target (all candidates saturated; this one has extra-usage available)."
         else
-            echo "Decision: switching to Account-$target (last-resort: every account is saturated and none have extra usage)."
+            echo "Decision: switching to Account-$target (every account is saturated, none have extra usage — this one frees up first, in $(format_back_in "$(saturated_back_in "$target_five" "$target_five_rem" "$target_seven" "$target_seven_rem")"))."
         fi
     else
         echo "Decision: switching to Account-$target (lower than current Account-${current_account:-?})."
@@ -2670,7 +2728,7 @@ predict_next_target_core() {
             if [[ "$target_extra" == "true" ]]; then
                 echo "Next target: Account-$target (saturated but has extra-usage)"
             else
-                echo "Next target: Account-$target (last-resort: all saturated, no extra-usage)"
+                echo "Next target: Account-$target (all saturated, no extra-usage — frees up first, in $(format_back_in "$(saturated_back_in "$target_five" "$target_five_rem" "$target_seven" "$target_seven_rem")"))"
             fi
         else
             echo "Next target: Account-$target (lowest adjusted${fable_note})"

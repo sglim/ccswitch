@@ -191,7 +191,7 @@ on 일 때는 `--tick` 의 7d 리셋 fast-path 도 같은 규칙을 따릅니다
 | 5 | **healthy** | 두 윈도우 모두 100% 미만. handicap 유무 무관 — handicap 은 `adjusted` 점수에만 반영되고 tier 를 나누지 않음. 따라서 handicap 계정이라도 adjusted 가 최저면 이 tier 에서 선택됨 |
 | 6 | **maxed-with-extra (alt)** | 한 윈도우 100% 이지만 `hasExtraUsageEnabled` 이고 **현재 active 가 아닌** 계정 — 동등 후보 간 round-robin |
 | 7 | **maxed-with-extra** | 4번과 동일하나 `current` 가 유일 후보일 때 |
-| 8 | **maxed-no-extra** | 한 윈도우 100%, extra-usage 없음 |
+| 8 | **maxed-no-extra** | 한 윈도우 100%, extra-usage 없음. 이 tier 안에서는 **가장 빨리 다시 쓸 수 있는 계정**(막힌 창이 모두 풀리는 시각이 가장 이른 것)을 고른다 — 풀리는 순간 전환·재시작 없이 바로 쓰게 |
 | 9 | **blocked-handicap** | `handicap > 0 && raw_max + handicap >= 100` — handicap 포함 사용률이 100% 이상인 계정은 실사용에 여유가 있어도 최후의 fallback 으로만 선택 (handicap 의 "이 계정 아끼기" 의도를 지키는 안전장치) |
 
 ### Tie-break
@@ -200,6 +200,8 @@ on 일 때는 `--tick` 의 7d 리셋 fast-path 도 같은 규칙을 따릅니다
 1. 가장 낮은 `adjusted`
 2. 그 다음 가장 짧은 `seven_rem` (7d 윈도우 reset 임박 계정 우선 — 어차피 곧 cap 갱신될 거니 먼저 소비)
 3. 그 다음 가장 낮은 계정 번호 (결정적 fallback)
+
+예외: **maxed-no-extra** 는 다시 쓸 수 있을 때까지 남은 시간(막힌 창이 모두 풀리는 시각)이 짧은 순, 동률이면 낮은 `adjusted`.
 
 ### Hysteresis
 
