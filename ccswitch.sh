@@ -142,6 +142,40 @@ is_cold_candidate() {
     (( seven < COLD_MAX_SEVEN ))
 }
 
+# 5h 제한이 없는 계정. Max 20x 가 Ultra 로 바뀌며 5h 한도가 계정마다 단계적으로
+# 없어진다(2026-11). 그런 계정도 API 는 "five_hour": null 을 줘서 5h 창이 아직 안
+# 열린 계정과 모양이 같고, 그대로 두면 cold 로 뽑혀 정기 조회마다 건드려진다
+# (2026-11-01: 12번이 하루 10번). 등급(rateLimitTier)으로는 못 가른다 — 같은
+# max_20x 라도 아직 5h 가 있는 계정이 있다. 그래서 claude 를 실제로 돌린 뒤에도
+# 창이 안 열렸으면 「제한 없음」으로 남기고, 창이 열린 응답을 보면 지운다.
+# 표·row 에서는 5h 를 「-」로 둔다 — 숫자가 아니라 포화·cold 판정에서 저절로 빠진다.
+readonly FIVE_HOUR_STATE_DIR="$BACKUP_DIR/five-hour"
+
+# --refresh 가 claude 를 한 번 돌렸다 — 5h 제한이 있으면 지금 창이 열렸어야 한다.
+mark_five_hour_touched() {
+    /bin/mkdir -p "$FIVE_HOUR_STATE_DIR" 2>/dev/null || return 0
+    date +%s > "$FIVE_HOUR_STATE_DIR/touched-$1-$2" 2>/dev/null || true
+}
+
+# 실측 응답으로 「제한 없음」 기록을 고친다. $3 = 5h 리셋 epoch(0 = five_hour null).
+# 건드린 지 1분~5시간 안이면 판단한다: 1분은 사용량 반영 지연, 5시간 뒤면 열렸던 창이
+# 이미 닫혔을 수 있다.
+update_no_five_hour() {
+    local none="$FIVE_HOUR_STATE_DIR/none-$1-$2" touched="$FIVE_HOUR_STATE_DIR/touched-$1-$2" at age
+    if (( $3 > 0 )); then
+        /bin/rm -f "$none"
+        return 0
+    fi
+    [[ -f "$touched" ]] && read -r at < "$touched" && [[ "$at" =~ ^[0-9]+$ ]] || return 0
+    age=$(( $(date +%s) - at ))
+    if (( age >= 60 && age < 18000 )); then
+        : > "$none"
+    fi
+    return 0
+}
+
+has_no_five_hour() { [[ -f "$FIVE_HOUR_STATE_DIR/none-$1-$2" ]]; }
+
 # 주간 한도가 곧 리셋되는데 아직 여유가 남은 계정 — 안 쓰면 그 여유가 그대로
 # 버려진다. urgency_bonus 만으로는 이걸 못 살린다: 방금 리셋된 계정은 raw 가 0
 # 이라 adjusted 가 0 이고, adjusted 는 0 아래로 안 내려가므로 임박 계정이
@@ -1313,6 +1347,10 @@ gather_all_usage() {
                     fi
                 fi
             fi
+            [[ "$status" == "ok" ]] && update_no_five_hour "$num" "$email" "$five_reset"
+            if [[ "$five" == "0" ]] && (( five_reset == 0 )) && has_no_five_hour "$num" "$email"; then
+                five="-"
+            fi
             # Remaining-time fields are still needed for the table's
             # "5h-rst"/"7d-rst" columns and for cold-tier qualification
             # in the picker.
@@ -1348,7 +1386,7 @@ gather_all_usage() {
             # 덮어쓴다. 그러면 5h 9% 와 5h 38% 가 똑같이 adjusted 0 이 되어
             # picker 가 둘을 구분하지 못한다.
             local raw_max bind_rem urgency_window
-            if (( five > seven )); then
+            if [[ "$five" =~ ^[0-9]+$ ]] && (( five > seven )); then
                 raw_max=$five; bind_rem=$five_rem; urgency_window=5
             else
                 raw_max=$seven; bind_rem=$seven_rem; urgency_window=48
@@ -1450,7 +1488,7 @@ render_usage_table() {
             # interpolate naturally because cached reset epochs are absolute.
             printf '%-3s %-2s %-32s %5s %7s %5s %7s %8s %9s %9s %4s\n' \
                 "$prefix" "$num" "$email" \
-                "${five}?" "$(format_remaining "$five_rem")" \
+                "$([[ "$five" == "-" ]] && echo "-" || echo "${five}?")" "$(format_remaining "$five_rem")" \
                 "${seven}?" "$(format_remaining "$seven_rem")" \
                 "$fable_disp" "$handicap" "${adjusted}?" "$ext_disp"
         else
@@ -1587,7 +1625,9 @@ pick_from_usage_data() {
         # account's headroom is about to refresh anyway, so spend it
         # first rather than burning a slot with weeks of cap left).
         if ! is_cold_candidate "$five" "$five_rem" "$seven" "$status"; then
-            if [[ "$five" == "0" && ( -z "$five_rem" || "$five_rem" == "0" ) ]]; then
+            if [[ "$five" == "-" ]]; then
+                why_acct "$num" "cold 제외: 5h 제한 없음 — 건드려도 5h 창이 안 열림"
+            elif [[ "$five" == "0" && ( -z "$five_rem" || "$five_rem" == "0" ) ]]; then
                 if [[ "$status" != "ok" ]]; then
                     why_acct "$num" "cold 제외: 실측 없음(status=${status}) — 5h 0 은 추정치"
                 else
@@ -2988,6 +3028,9 @@ cmd_refresh() {
 
         new_exp=$(jq -r '.claudeAiOauth.expiresAt // 0' <<<"$new" 2>/dev/null || echo 0)
         [[ "$new_exp" =~ ^[0-9]+$ ]] || new_exp=0
+        if (( rc == 0 )); then
+            mark_five_hour_touched "$n" "$email"
+        fi
         owner=$(creds_owner "$new")
         if (( new_exp > old_exp )) && [[ "$owner" == "$uuid"$'\t'"$org" ]]; then
             write_account_credentials "$n" "$email" "$new"
