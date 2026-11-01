@@ -176,28 +176,18 @@ update_no_five_hour() {
 
 has_no_five_hour() { [[ -f "$FIVE_HOUR_STATE_DIR/none-$1-$2" ]]; }
 
-# 모든 계정이 5h 제한 없음(Ultra). 계정마다 판별(위 none- 기록)은 건드려 봐야
-# 생기는데, 지금 쓰는 계정은 건드리지 않으므로 끝내 판별되지 않는다 — 2026-11-02
-# 현재 계정이 5h 창 없이 7d 3→42% 로 쓰이는 동안 「cold」로 남아, 23시간 뒤 리셋되는
-# 7d 6% 계정(expiring)을 이겼다. 모든 계정이 Ultra 인 사람은 이걸 켜면 5h 창이 안
-# 열린 응답을 전부 「제한 없음」으로 보고 7d 로만 고른다(cold·건드리기 없음).
-# 실제로 열린 5h 창이 있으면 그 숫자는 그대로 쓴다. 기본은 꺼짐 — 다른 사용자 동작은 그대로.
-# 우선순위: 환경변수 > sequence.json 의 .settings.noFiveHour > 기본(off)
-_NO_FIVE_HOUR_CACHED=""
-no_five_hour_all() {
-    if [[ -z "$_NO_FIVE_HOUR_CACHED" ]]; then
-        local v=""
-        if [[ -n "${CCSWITCH_NO_FIVE_HOUR:-}" ]]; then
-            v="$CCSWITCH_NO_FIVE_HOUR"
-        elif [[ -f "$SEQUENCE_FILE" ]]; then
-            v=$(jq -r '.settings.noFiveHour // false' "$SEQUENCE_FILE" 2>/dev/null)
-        fi
-        case "$(printf '%s' "$v" | tr '[:upper:]' '[:lower:]')" in
-            1|true|on|yes) _NO_FIVE_HOUR_CACHED=1 ;;
-            *)             _NO_FIVE_HOUR_CACHED=0 ;;
-        esac
-    fi
-    [[ "$_NO_FIVE_HOUR_CACHED" == "1" ]]
+# 5h 창 없이 쓰인 것을 보았다 — 직전 조회에도 지금도 5h 창이 없는데 그 사이 7d 가
+# 올랐다. 5h 제한이 있는 계정이면 쓰는 순간 창이 열려 5시간 동안 남는다.
+# 위 touched 판정은 --refresh 로 건드린 계정에만 생기는데, 지금 쓰는 계정은 건드리지
+# 않아서 끝내 판별되지 않았다(2026-11-02: 현재 계정 2번이 5h 창 없이 7d 3→18→30→42%
+# 로 쓰이는 동안 cold 로 남아, 23시간 뒤 리셋되는 7d 6% 계정을 이겼다).
+# $3·$4 = 직전·지금 7d, $5 = 직전 조회 뒤 지난 초. 1분~5시간 안일 때만 본다
+# (1분 = 사용량 반영 지연, 5시간 = 그사이 창이 열렸다 닫혔을 수 있음).
+note_used_without_five_hour() {
+    [[ "$3" =~ ^[0-9]+$ && "$4" =~ ^[0-9]+$ && "$5" =~ ^[0-9]+$ ]] || return 0
+    (( $4 > $3 && $5 >= 60 && $5 < 18000 )) || return 0
+    /bin/mkdir -p "$FIVE_HOUR_STATE_DIR" 2>/dev/null || return 0
+    : > "$FIVE_HOUR_STATE_DIR/none-$1-$2" 2>/dev/null || true
 }
 
 # 주간 한도가 곧 리셋되는데 아직 여유가 남은 계정 — 안 쓰면 그 여유가 그대로
@@ -1213,6 +1203,18 @@ fetch_account_utilization() {
     # cache use. Costs nothing and means a subsequent --show-usage hit
     # within TTL serves from disk without burning more API quota.
     /bin/mkdir -p "$USAGE_CACHE_DIR" 2>/dev/null
+    if (( five_reset == 0 )) && [[ -f "$cache_file" ]]; then
+        local prev_seven="" prev_five_reset="" prev_mtime=0
+        read -r _ prev_seven prev_five_reset _ < "$cache_file" 2>/dev/null || true
+        if [[ "$prev_five_reset" == "0" ]]; then
+            if [[ "$(detect_platform)" == "macos" ]]; then
+                prev_mtime=$(/usr/bin/stat -f %m "$cache_file" 2>/dev/null || echo 0)
+            else
+                prev_mtime=$(/usr/bin/stat -c %Y "$cache_file" 2>/dev/null || echo 0)
+            fi
+            note_used_without_five_hour "$account_num" "$email" "$prev_seven" "$seven" "$(( $(date +%s) - prev_mtime ))"
+        fi
+    fi
     printf '%s\n' "$result" > "$cache_file" 2>/dev/null
     echo "$result"
 }
@@ -1372,7 +1374,7 @@ gather_all_usage() {
                 fi
             fi
             [[ "$status" == "ok" ]] && update_no_five_hour "$num" "$email" "$five_reset"
-            if [[ "$five" == "0" ]] && (( five_reset == 0 )) && { no_five_hour_all || has_no_five_hour "$num" "$email"; }; then
+            if [[ "$five" == "0" ]] && (( five_reset == 0 )) && has_no_five_hour "$num" "$email"; then
                 five="-"
             fi
             # Remaining-time fields are still needed for the table's
