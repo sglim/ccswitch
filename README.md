@@ -162,6 +162,14 @@ ccswitch.sh --fable-priority        # 현재 상태 확인
 CCSWITCH_FABLE_PRIORITY=on ccswitch.sh --switch-lowest
 ```
 
+#### 모든 계정이 5h 제한 없음(Ultra)
+
+계정이 전부 5h 제한이 없는 Ultra 라면 켭니다. 5h 창이 안 열린 응답을 전부 「제한 없음」(표에 5h `-`)으로 보고 7d 로만 고릅니다 — cold 판정과 5h 클럭 건드리기를 하지 않습니다. 실제로 열린 5h 창이 있으면 그 숫자는 그대로 씁니다. 기본은 꺼짐이고, 켜려면 `sequence.json` 의 `.settings.noFiveHour` 를 `true` 로 두거나 환경변수를 씁니다:
+
+```bash
+CCSWITCH_NO_FIVE_HOUR=on ccswitch.sh --switch-lowest
+```
+
 #### 특정 계정의 Fable 을 마지막에 쓰기
 
 "이 계정 Fable 은 아껴두고 싶다" 는 경우 계정별 Fable handicap 을 겁니다. 일반 `handicap` 과 별개이며, **유효 Fable = 실제 사용률 + handicap** 으로 평가합니다.
