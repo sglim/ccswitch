@@ -196,8 +196,11 @@ note_used_without_five_hour() {
 # 아무리 급해도 못 이긴다(2026-10: 7d 35%·리셋 16시간 남은 계정이 adjusted 2 로
 # 방금 리셋된 0 짜리에게 졌다). 그래서 점수가 아니라 tier 로 올린다.
 # cold 보다 아래에 두는 이유: 5h 클럭을 시작해 두는 투자가 한 번은 먼저다.
+# 7d 상한은 100(= 포화 전까지) — 이 판정은 picker 의 「포화 아님」 분기 안에서만
+# 돌므로 5h 99%·7d 100% 는 is_saturated 가 따로 거른다. 예전 기본 90 은 리셋 8분
+# 전 7d 91%·5h 29% 인 계정을 빼서, 남은 9% 를 버리고 다른 계정에 머물렀다(2026-11-03).
 readonly EXPIRING_MAX_HOURS="${CCSWITCH_EXPIRING_MAX_HOURS:-24}"
-readonly EXPIRING_MAX_SEVEN="${CCSWITCH_EXPIRING_MAX_SEVEN:-90}"
+readonly EXPIRING_MAX_SEVEN="${CCSWITCH_EXPIRING_MAX_SEVEN:-100}"
 
 is_expiring_candidate() {
     local seven="$1" seven_rem="$2"
