@@ -1238,7 +1238,20 @@ account_has_backup() {
     # 자격증명은 작다. 키체인 항목이 "있지만 비어 있는" 경우까지 걸러낸다.
     local creds
     creds=$(read_account_credentials "$account_num" "$email")
-    [[ -n "${creds//[[:space:]]/}" ]]
+    [[ -n "${creds//[[:space:]]/}" ]] || return 1
+    ! refresh_expired "$creds"
+}
+
+# 백업 칸의 refresh token 이 만료됐다 — 그 계정으로 옮기면 access 가 만료되는 즉시
+# (이미 만료면 곧바로) 세션이 「Login expired」로 멈춘다. /login 후 --add-account 말고는
+# 복구할 길이 없으니 전환 후보에서 뺀다. 2026-11-02 17:00 7d 리셋 즉시 전환이 refresh 가
+# 이미 만료된 4번으로 옮겨 1분 뒤 세션들이 로그인 만료로 멈췄다 — --list 와 알림은
+# 이미 「refresh 만료」를 알고 있었는데 전환 판단만 안 봤다.
+# 지금 쓰는 계정에는 쓰지 않는다: Claude Code 가 live 저장소에서 갱신하므로 백업 칸과 무관.
+refresh_expired() {
+    local refresh_ms
+    refresh_ms=$(jq -r '.claudeAiOauth.refreshTokenExpiresAt // 0' <<<"$1" 2>/dev/null || echo 0)
+    [[ "$refresh_ms" =~ ^[0-9]+$ ]] && (( refresh_ms > 0 && refresh_ms / 1000 <= $(date +%s) ))
 }
 
 get_account_fable_handicap() {
@@ -1278,6 +1291,11 @@ gather_all_usage() {
 
     local nums
     nums=$(jq -r '.accounts | keys | map(tonumber) | sort | .[]' "$SEQUENCE_FILE")
+    # 풀들이 지금 쓰는 계정 — 이 계정들은 백업 칸의 refresh 만료로 빼지 않는다.
+    local live_nums=" " p
+    for p in $(pool_names); do
+        live_nums+="$(pool_current_account "$p" 2>/dev/null || true) "
+    done
 
     while read -r num; do
         [[ -z "$num" ]] && continue
@@ -1312,6 +1330,9 @@ gather_all_usage() {
             # 최우선으로 고른 뒤 perform_switch 에서 죽는다. 아예 후보에서 뺀다.
             status="nobackup"
             echo "  [Account-$num $email] no backup credentials — excluded (re-login and run --add-account)" >&2
+        elif [[ "$live_nums" != *" $num "* ]] && refresh_expired "$cred_cached"; then
+            status="nobackup"
+            echo "  [Account-$num $email] login expired (refresh token) — excluded (re-login and run --add-account)" >&2
         elif util_pair=$(fetch_account_utilization "$num" "$email" "$cred_cached"); then
             status="ok"
         else
@@ -2152,7 +2173,7 @@ cmd_switch() {
             next_account="$cand"
             break
         fi
-        echo "Skipping Account-$cand ($cand_email): no backup credentials — re-login and run --add-account" >&2
+        echo "Skipping Account-$cand ($cand_email): no backup credentials or login expired — re-login and run --add-account" >&2
     done
     if [[ -z "$next_account" ]]; then
         echo "Error: 이 풀에서 전환할 수 있는 다른 계정이 없다 (백업이 없거나 다른 풀이 쓰는 중)"
@@ -2353,7 +2374,7 @@ cmd_tick_pool() {
             local nemail
             nemail=$(jq -r --arg n "$n" '.accounts[$n].email // ""' "$SEQUENCE_FILE")
             if ! account_has_backup "$n" "$nemail"; then
-                echo "[$(date '+%Y-%m-%d %H:%M:%S')] Account-$n 7d window just reset but has no backup credentials — skipping fast-path."
+                echo "[$(date '+%Y-%m-%d %H:%M:%S')] Account-$n 7d window just reset but has no backup credentials or its login expired — skipping fast-path."
                 continue
             fi
             nfable=$(awk '{print $7}' "$ncache" 2>/dev/null)
