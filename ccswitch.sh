@@ -3172,6 +3172,18 @@ cmd_relogin() {
     fi
     write_account_credentials "$n" "$email" "$new"
     echo "✅ Account-$n ($email) 다시 로그인됨 — 백업 칸에 저장. 지금 세션들은 그대로다."
+    # 받은 토큰으로 사용량도 바로 받는다 — 캐시에 들어가 표·picker 가 정각 조회를 기다리지 않는다.
+    local u f s fr sr five_txt seven_txt
+    if u=$(fetch_account_utilization "$n" "$email" "$new" 2>/dev/null); then
+        read -r f s fr sr _ <<<"$u"
+        five_txt="5h 창 없음"
+        (( fr > 0 )) && five_txt="5h ${f}% (리셋 $(date -r "$fr" '+%H:%M'))"
+        seven_txt="7d ${s}%"
+        (( sr > 0 )) && seven_txt+=" (리셋 $(date -r "$sr" '+%m-%d %H:%M'))"
+        echo "   사용량: $five_txt · $seven_txt"
+    else
+        echo "   사용량은 받지 못했다 — 다음 조회 때 채워진다."
+    fi
 }
 
 cmd_sync_current() {
