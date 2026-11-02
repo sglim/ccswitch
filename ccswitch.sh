@@ -371,7 +371,7 @@ notify_refresh_expired() {
     if [[ -n "$org_name$org_uuid" ]]; then
         label+=" ($(format_org_label "$org_name" "$org_uuid" "$email"))"
     fi
-    msg="$label 의 로그인(refresh token)이 만료되었습니다. 이 계정으로 /login 한 뒤 ccswitch.sh --add-account 로 다시 등록해 주세요."
+    msg="$label 의 로그인(refresh token)이 만료되었습니다. ccswitch.sh --relogin $num 으로 다시 로그인해 주세요(전환하지 않습니다)."
 
     if command -v terminal-notifier >/dev/null 2>&1; then
         terminal-notifier -title "$title" -message "$msg" -sound default >/dev/null 2>&1 || true
@@ -691,7 +691,7 @@ token_status_label() {
     if (( refresh_ms == 0 )); then
         refresh_part="refresh ?"
     elif (( refresh_ms / 1000 <= now )); then
-        refresh_part="refresh 만료 — /login 후 --add-account"
+        refresh_part="refresh 만료 — --relogin 으로 다시 로그인"
     else
         refresh_part="refresh $(format_token_remaining $(( refresh_ms / 1000 - now )))"
     fi
@@ -1332,7 +1332,7 @@ gather_all_usage() {
             echo "  [Account-$num $email] no backup credentials — excluded (re-login and run --add-account)" >&2
         elif [[ "$live_nums" != *" $num "* ]] && refresh_expired "$cred_cached"; then
             status="nobackup"
-            echo "  [Account-$num $email] login expired (refresh token) — excluded (re-login and run --add-account)" >&2
+            echo "  [Account-$num $email] login expired (refresh token) — excluded (run --relogin $num)" >&2
         elif util_pair=$(fetch_account_utilization "$num" "$email" "$cred_cached"); then
             status="ok"
         else
@@ -3091,7 +3091,7 @@ cmd_refresh() {
         else
             first=$( { echo "$out" | grep -v '^Warning: no stdin' || true; } | head -1 | cut -c1-70 )
             if [[ "$out" == *"could not be refreshed"* || "$out" == *"/login"* ]]; then
-                reason="refresh 토큰이 이미 죽음 — 이 계정으로 /login 후 --add-account 필요"
+                reason="refresh 토큰이 이미 죽음 — ccswitch.sh --relogin $n 필요"
             elif (( new_exp <= old_exp )); then
                 reason="토큰이 갱신되지 않음"
             else
@@ -3114,6 +3114,64 @@ cmd_refresh() {
     if [[ "${CCSWITCH_REFRESH_TOUCH:-0}" == 1 ]]; then
         (( ok > 0 ))
     fi
+}
+
+# 전환하지 않고 그 계정만 다시 로그인한다(--relogin <num>). refresh 가 죽은 계정
+# (--list 의 「refresh 만료」)은 예전엔 그 계정으로 /login → --add-account 를 해야 해서
+# 그동안 세션들이 그 계정으로 옮겨졌다. 여기서는 --refresh 처럼 임시 CLAUDE_CONFIG_DIR
+# 에서 `claude auth login` 을 돌려(브라우저 로그인) 나온 토큰을, 주인이 그 계정일 때만
+# 백업 칸에 쓴다. 세션들이 쓰는 live 로그인은 건드리지 않는다.
+cmd_relogin() {
+    [[ -f "$SEQUENCE_FILE" ]] || { echo "Error: No accounts are managed yet"; exit 1; }
+    local n="${1:-}" email uuid org cfgfile bin D svc new owner rc=0 p stale
+    [[ "$n" =~ ^[0-9]+$ ]] || { echo "Usage: $0 --relogin <num>"; exit 1; }
+    email=$(jq -r --arg n "$n" '.accounts[$n].email // ""' "$SEQUENCE_FILE")
+    [[ -n "$email" ]] || { echo "Error: Account-$n 은 없는 계정이다."; exit 1; }
+    for p in $(pool_names); do
+        if [[ "$(pool_current_account "$p" 2>/dev/null || true)" == "$n" ]]; then
+            echo "Error: Account-$n 은 지금 쓰는 계정이다 — 그 세션에서 /login 한다."
+            exit 1
+        fi
+    done
+    cfgfile="$BACKUP_DIR/configs/.claude-config-${n}-${email}.json"
+    [[ -s "$cfgfile" ]] || { echo "Error: Account-$n 의 설정 백업이 없다 — 그 계정으로 /login 후 --add-account."; exit 1; }
+    uuid=$(jq -r --arg n "$n" '.accounts[$n].uuid // ""' "$SEQUENCE_FILE")
+    org=$(jq -r --arg n "$n" '.accounts[$n].organizationUuid // ""' "$SEQUENCE_FILE")
+    bin=$(command -v claude || echo "$HOME/.local/bin/claude")
+
+    # 이름을 refresh.* 와 가른다 — 30분마다 도는 --refresh 가 찌꺼기로 보고 로그인 도중에 지우지 않게.
+    for stale in "$BACKUP_DIR"/relogin.*; do
+        [[ -d "$stale" ]] || continue
+        security delete-generic-password -s "$(dir_keychain_service "$stale")" -a "$USER" >/dev/null 2>&1 || true
+        rm -rf "$stale"
+    done
+    D=$(mktemp -d "$BACKUP_DIR/relogin.XXXXXX")
+    REFRESH_TMP="$D"
+    trap 'if [[ -n "$REFRESH_TMP" ]]; then security delete-generic-password -s "$(dir_keychain_service "$REFRESH_TMP")" -a "$USER" >/dev/null 2>&1; rm -rf "$REFRESH_TMP"; fi' EXIT
+    svc=$(dir_keychain_service "$D")
+    cp "$cfgfile" "$D/.claude.json"
+    chmod 600 "$D/.claude.json"
+
+    echo "Account-$n ($email) 로 로그인한다 — 브라우저에서 이 계정으로 들어가야 한다."
+    (cd "$D" && env CLAUDE_CONFIG_DIR="$D" "$bin" auth login --email "$email") || rc=$?
+    new=$(security find-generic-password -s "$svc" -a "$USER" -w 2>/dev/null || true)
+    [[ -z "$new" && -f "$D/.credentials.json" ]] && new=$(cat "$D/.credentials.json")
+    security delete-generic-password -s "$svc" -a "$USER" >/dev/null 2>&1 || true
+    rm -rf "$D"
+    REFRESH_TMP=""
+    trap - EXIT
+
+    if [[ -z "${new//[[:space:]]/}" ]]; then
+        echo "❌ 로그인 토큰을 받지 못했다 (rc=$rc)."
+        exit 1
+    fi
+    owner=$(creds_owner "$new")
+    if [[ "$owner" != "$uuid"$'\t'"$org" ]]; then
+        echo "❌ 로그인한 계정이 Account-$n ($email) 이 아니다 — 저장하지 않았다. 브라우저에서 계정을 바꿔 다시 한다."
+        exit 1
+    fi
+    write_account_credentials "$n" "$email" "$new"
+    echo "✅ Account-$n ($email) 다시 로그인됨 — 백업 칸에 저장. 지금 세션들은 그대로다."
 }
 
 cmd_sync_current() {
@@ -3821,6 +3879,7 @@ show_usage() {
     echo "  --set-fable-handicap <num> <percent>       Per-account Fable handicap (0-100); 100 = use that account's Fable last"
     echo "  --sync-current                             Refresh current account's backup from live state"
     echo "  --refresh [num...]                         만료된 백업 토큰을 claude -p 로 갱신 (지금 쓰는 계정 제외, 계정당 Haiku 1회)"
+    echo "  --relogin <num>                            전환하지 않고 그 계정만 다시 로그인 (refresh 만료 계정용, 브라우저 로그인)"
     echo "  --agent-install                            Install/update the macOS LaunchAgent (recommended on macOS)"
     echo "  --agent-status                             Show LaunchAgent state (launchctl print)"
     echo "  --agent-kick                               Trigger the LaunchAgent now (launchctl kickstart)"
@@ -3918,6 +3977,10 @@ main() {
         --refresh)
             shift
             cmd_refresh "$@"
+            ;;
+        --relogin)
+            shift
+            cmd_relogin "$@"
             ;;
         --sync-current)
             cmd_sync_current
